@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <title>TikTok LIVE Scorekeeper</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <h1>TikTok LIVE Scorekeeper</h1>
+    </div>
+    <span class="divider" aria-hidden="true"></span>
+    <div class="show-id" title="Current show">
+      <strong id="show-title">Untitled show</strong>
+      <span id="show-meta" class="show-meta">A new show starts with each stream session.</span>
+    </div>
+    <div class="titlebar-drag" aria-hidden="true"></div>
+
+    <div class="header-actions">
+      <div id="status" class="status-pill" data-state="disconnected"><span></span><b>Not connected</b></div>
+      <input id="username" aria-label="Host username" autocomplete="off" placeholder="@creator">
+      <button id="connect" class="button success">Connect</button>
+      <div class="menu-anchor">
+        <button id="tools-menu-button" class="button ghost icon-button menu-button" aria-haspopup="true" aria-expanded="false" aria-controls="tools-menu" title="Session tools: guests, overlay URL, simulate, export" aria-label="Session tools">&#8943;</button>
+        <div id="tools-menu" class="popover" role="menu" aria-labelledby="tools-menu-button" hidden>
+          <p class="popover-heading">Session tools</p>
+          <button class="menu-item" role="menuitem" id="discover-guests"><span>Sign in / refresh guests</span><kbd>Ctrl G</kbd></button>
+          <button class="menu-item" role="menuitem" id="copy-overlay"><span>Copy OBS overlay URL</span><kbd>Ctrl Shift O</kbd></button>
+          <button class="menu-item" role="menuitem" id="simulate"><span>Simulate gift</span><kbd>Ctrl Shift G</kbd></button>
+          <span class="popover-sep"></span>
+          <button class="menu-item" role="menuitemcheckbox" aria-checked="false" id="show-small"><span>Show small gifts (&lt;10)</span><kbd>Ctrl Shift H</kbd></button>
+          <button class="menu-item" role="menuitemcheckbox" aria-checked="true" id="auto-connect"><span>Auto-connect on launch</span><kbd>Ctrl Shift A</kbd></button>
+          <button class="menu-item" role="menuitem" id="routing"><span>Gift routing rules</span><kbd>Ctrl Shift R</kbd></button>
+          <span class="popover-sep"></span>
+          <button class="menu-item" role="menuitem" id="export"><span>Export CSV</span><kbd>Ctrl E</kbd></button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel scoreboard-panel">
+      <div class="section-heading">
+        <h2 class="white-title">Scoreboard</h2>
+      </div>
+      <div id="scoreboard" class="scoreboard"></div>
+    </section>
+
+    <section class="panel event-panel">
+      <div class="section-heading">
+        <div><h2>Gift events</h2></div>
+        <div class="heading-tools">
+          <div id="event-filters" class="filters" role="group" aria-label="Filter events">
+            <button class="chip" type="button" data-filter="all" aria-pressed="true">All <b id="count-all">0</b></button>
+            <button class="chip" type="button" data-filter="unassigned" aria-pressed="false">Needs review <b id="count-review">0</b></button>
+          </div>
+          <span id="event-count" class="counter">0 events</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Viewer</th><th>Gift</th><th>Qty</th><th>Points</th><th>Recipient</th></tr></thead>
+          <tbody id="events"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <p id="discovery-status" class="discovery-status" data-state="idle">Authenticated guest discovery has not started</p>
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+    <span class="statusbar-item">Overlay 127.0.0.1:17342/overlay</span>
+  </footer>
+
+  <dialog id="routing-dialog" class="modal" aria-labelledby="routing-title">
+    <div class="modal-body">
+      <h2 id="routing-title">Gift routing</h2>
+      <p class="modal-sub">Always credit a specific gift to a guest, even when it's sent to someone else.</p>
+      <ul id="routing-list" class="routing-list"></ul>
+      <form id="routing-form" class="routing-form">
+        <div class="routing-row">
+          <div class="combo">
+            <input id="routing-gift" placeholder="Search gifts…" autocomplete="off" required aria-label="Gift name" role="combobox" aria-expanded="false" aria-controls="gift-list" aria-autocomplete="list">
+          </div>
+          <select id="routing-guest" aria-label="Guest to credit"></select>
+          <button class="button success" type="submit">Add rule</button>
+        </div>
+      </form>
+      <div class="modal-actions">
+        <button id="routing-close" class="button ghost" type="button" autofocus>Done</button>
+      </div>
+    </div>
+    <ul id="gift-list" class="combo-list" role="listbox" popover="manual"></ul>
+  </dialog>
+  <script src="gift-catalog.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

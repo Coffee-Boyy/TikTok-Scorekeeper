@@ -1,0 +1,33 @@
+{
+  "name": "tiktok-live-scorekeeper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first Electron scorekeeper for TikTok LIVE gift events",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "tiktok-live-connector": "2.5.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "electron": "^44.4.3",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "local.codex.tiktok-live-scorekeeper",
+    "productName": "TikTok LIVE Scorekeeper",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "portable"
+    }
+  }
+}

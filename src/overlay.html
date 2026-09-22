@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; color: white; font-family: Inter, system-ui, sans-serif; }
+    #board { position: fixed; top: 28px; right: 28px; width: 360px; display: grid; gap: 8px; }
+    .title { padding: 12px 16px; border-radius: 13px 13px 7px 7px; background: rgba(8,10,15,.88); font-size: 13px; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+    .row { display: grid; grid-template-columns: 35px 1fr auto; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid rgba(255,255,255,.12); border-radius: 9px; background: rgba(12,15,22,.88); box-shadow: 0 9px 30px rgba(0,0,0,.24); }
+    .rank { color: #25f4ee; font-weight: 900; }
+    .name { font-weight: 800; }
+    .handle { display: block; margin-top: 2px; color: #aab1c1; font-size: 11px; font-weight: 500; }
+    .points { text-align: right; color: #25f4ee; font-size: 21px; font-weight: 900; }
+    .points small { display: block; color: #aab1c1; font-size: 9px; letter-spacing: .09em; text-transform: uppercase; }
+  </style>
+</head>
+<body>
+  <div id="board"></div>
+  <script>
+    const board = document.querySelector("#board");
+    const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
+    const displayName = value => String(value ?? "").normalize("NFKC").replace(/\p{Cf}/gu, "").trim();
+    function render(payload) {
+      const assigned = payload.scores.filter(score => score.participant.id !== null);
+      board.innerHTML = `<div class="title">${escapeHtml(payload.show.title)}</div>` + assigned.map((score, index) => `<div class="row"><span class="rank">${index + 1}</span><span class="name">${escapeHtml(displayName(score.participant.name))}<small class="handle">${score.participant.handle ? `@${escapeHtml(score.participant.handle)}` : ""}</small></span><span class="points">${score.points.toLocaleString()}<small>points</small></span></div>`).join("");
+    }
+    function connect() {
+      const socket = new WebSocket(`ws://${location.host}/events`);
+      socket.addEventListener("message", event => render(JSON.parse(event.data)));
+      socket.addEventListener("close", () => setTimeout(connect, 1500));
+    }
+    connect();
+  </script>
+</body>
+</html>
