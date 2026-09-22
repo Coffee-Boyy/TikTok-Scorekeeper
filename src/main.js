@@ -5,12 +5,11 @@ import { watch } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
-import { deserializeWebSocketMessage } from "tiktok-live-connector";
+import { TikTokLiveConnection } from "tiktok-live-connector";
 import { extractRecipient, jsonSafe, normalizeGift } from "./gifts.js";
 import { extractLinkEventRoster, extractPageBootstrap, extractRoomRoster } from "./guests.js";
 import { ShowStore } from "./store.js";
-
-app.commandLine.appendSwitch("remote-debugging-port", "0");
+import { GiftConnection } from "./gift-connection.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 17342;
@@ -22,17 +21,21 @@ let discoveryWindow;
 let discoveryUsername = "";
 let discoveryHost = { userId: "", handle: "" };
 let discoveryStatus = { state: "idle", detail: "Authenticated guest discovery has not started" };
-let discoveryDebuggerAttached = false;
 let discoveryClosingIntentionally = false;
 let discoveryAttentionTimer;
 let discoveryRetryTimer;
 let discoveryAttempt = 0;
 let discoveryHadSnapshot = false;
-let discoverySawSocket = false;
+let discoveryHasBootstrap = false;
+let discoveryLoginRequested = false;
 let discoveryLastError = "";
+let discoveryRetryCount = 0;
+let rosterRefreshTimer;
+let rosterRefreshInProgress = false;
+let playbackHandoffTimer;
 let loginWatcher;
 let settings = { autoConnect: true, lastUsername: "" };
-const pendingRoomResponses = new Set();
+const roomCaptureRequests = new Map();
 const overlayClients = new Set();
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -133,36 +136,43 @@ async function ingestGift(rawGift) {
   sendState();
 }
 
-async function processBrowserWebSocketFrame(params) {
-  if (params.response?.opcode !== 2 || !params.response.payloadData) return;
-  let decoded;
-  try {
-    decoded = await deserializeWebSocketMessage(Buffer.from(params.response.payloadData, "base64"));
-  } catch {
-    return;
+const giftListener = new GiftConnection({
+  onStatus: (state, detail) => setStatus(state, detail),
+  onRoom: (roomId, username) => store.beginStreamSession({ roomId, hostUsername: username }),
+  onGift: ingestGift,
+  onLink: data => mergeLinkEvent(data, "Live guest update"),
+  onLinkError: () => setDiscoveryStatus("error", "A live guest update failed. Existing guests remain; use Refresh guests to reconcile the roster."),
+  onRecovered: () => refreshGuestRoster(discoveryAttempt),
+  onFatal: () => {
+    connection = undefined;
+    discoveryAttempt++;
+    if (!discoveryHadSnapshot) setDiscoveryStatus("error", "Guest discovery stopped. Resolve the gift connection error, then connect again.");
+    closeReceiverAfterRoster();
   }
-  const messages = decoded.protoMessageFetchResult?.messages || [];
-  if (messages.length && connectionStatus.state !== "connected") {
-    setStatus("connected", "Active");
-  }
-  for (const message of messages) {
-    const decodedData = message.decodedData;
-    if (!decodedData?.data) continue;
-    if (decodedData.type === "WebcastGiftMessage") {
-      await ingestGift(decodedData.data);
-    } else if (/Link|Battle/i.test(decodedData.type)) {
-      await mergeLinkEvent(decodedData.data, "Live guest update");
-    }
+});
+
+function closeReceiverAfterRoster() {
+  clearTimeout(discoveryAttentionTimer);
+  clearTimeout(discoveryRetryTimer);
+  clearInterval(rosterRefreshTimer);
+  clearInterval(playbackHandoffTimer);
+  clearInterval(loginWatcher);
+  if (discoveryWindow && !discoveryWindow.isDestroyed()) {
+    discoveryClosingIntentionally = true;
+    discoveryWindow.close();
   }
 }
 
-async function captureRoomResponse(debuggerApi, requestId) {
-  const response = await debuggerApi.sendCommand("Network.getResponseBody", { requestId });
-  const body = response.base64Encoded ? Buffer.from(response.body, "base64").toString("utf8") : response.body;
+function parseRoomBody(body) {
   // TikTok emits some 64-bit IDs as bare JSON numbers. Quote them before parsing
   // so JavaScript does not silently round IDs used for gift attribution.
   const safeBody = body.replace(/("(?:[A-Za-z0-9_]*_id|id)"\s*:\s*)(\d{16,})/g, '$1"$2"');
-  const payload = JSON.parse(safeBody);
+  return JSON.parse(safeBody);
+}
+
+async function applyRoomBody(body) {
+  if (!body) throw new Error("TikTok returned an empty room response");
+  const payload = parseRoomBody(body);
   const room = payload?.data?.data || payload?.data || payload?.room;
   if (!room || typeof room !== "object" || (!room.owner && !room.id && !room.room && !room.group_live_session && !room.groupLiveSession)) {
     throw new Error("TikTok did not return an authenticated LIVE room snapshot");
@@ -170,20 +180,95 @@ async function captureRoomResponse(debuggerApi, requestId) {
   const roomId = String(room.id_str || room.id || room.room_id || room.roomId || "");
   await store.beginStreamSession({ roomId, hostUsername: discoveryUsername });
   const roster = extractRoomRoster(payload, discoveryUsername);
-  await mergeRoster(roster, "Authenticated room snapshot");
-  discoveryHadSnapshot = true;
+  if (roster.guests.length) {
+    await mergeRoster(roster, "Authenticated room snapshot");
+    discoveryHadSnapshot = true;
+    clearTimeout(discoveryAttentionTimer);
+    clearTimeout(discoveryRetryTimer);
+    closeReceiverAfterRoster();
+  }
   discoveryLastError = "";
-  clearTimeout(discoveryAttentionTimer);
-  clearTimeout(discoveryRetryTimer);
-  if (discoveryWindow && !discoveryWindow.isDestroyed()) {
-    discoveryWindow.setOpacity(0);
-    discoveryWindow.setIgnoreMouseEvents(true);
-    discoveryWindow.hide();
+}
+
+async function refreshGuestRoster(attempt) {
+  if (attempt !== discoveryAttempt || !store.show.streamSessionId || rosterRefreshInProgress) return;
+  rosterRefreshInProgress = true;
+  try {
+    const roomId = store.show.streamSessionId;
+    const endpoints = [
+      ["Room info", `/webcast/room/info/?aid=1988&room_id=${encodeURIComponent(roomId)}`],
+      ["Multi-guest roster", `/webcast/linkmic_multi_guest/webapp/audience_room_enter_backup/?aid=1988&app_id=1988&live_id=12&room_id=${encodeURIComponent(roomId)}`]
+    ];
+    for (const [label, pathname] of endpoints) {
+      try {
+        const response = await fetch(`https://webcast.us.tiktok.com${pathname}`, {
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(10_000)
+        });
+        if (!response.ok) continue;
+        const payload = parseRoomBody(await response.text());
+        if (payload.status_code !== 0) continue;
+        const roster = extractRoomRoster(payload, discoveryUsername);
+        if (attempt !== discoveryAttempt) return;
+        if (roster.guests.length) {
+          await mergeRoster(roster, label);
+          discoveryHadSnapshot = true;
+          closeReceiverAfterRoster();
+          break;
+        }
+      } catch (error) {
+        discoveryLastError = `${label}: ${error.message}`;
+      }
+    }
+  } finally {
+    rosterRefreshInProgress = false;
   }
 }
 
+function installRoomCapture() {
+  const receiverSession = session.fromPartition("persist:tiktok-scorekeeper-auth");
+  const filter = { urls: ["https://webcast.us.tiktok.com/webcast/room/enter/*"] };
+  receiverSession.webRequest.onBeforeRequest(filter, (details, callback) => {
+    roomCaptureRequests.set(details.id, {
+      url: details.url,
+      method: details.method,
+      body: Buffer.concat((details.uploadData || []).filter(item => item.bytes).map(item => item.bytes)),
+      attempt: discoveryAttempt
+    });
+    callback({});
+  });
+  receiverSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
+    const request = roomCaptureRequests.get(details.id);
+    if (request) request.headers = details.requestHeaders;
+    callback({ requestHeaders: details.requestHeaders });
+  });
+  const finish = details => {
+    const request = roomCaptureRequests.get(details.id);
+    if (!request) return;
+    roomCaptureRequests.delete(details.id);
+    if (request.attempt !== discoveryAttempt || details.statusCode !== 200 || details.error && details.error !== "net::OK") return;
+    void (async () => {
+      const cookies = await receiverSession.cookies.get({ url: request.url });
+      const headers = Object.fromEntries(Object.entries(request.headers || {}).filter(([name]) =>
+        !/^(host|content-length|cookie|sec-fetch-)/i.test(name)));
+      headers.Cookie = cookies.map(cookie => `${cookie.name}=${cookie.value}`).join("; ");
+      const response = await fetch(request.url, {
+        method: request.method,
+        headers,
+        body: request.body,
+        signal: AbortSignal.timeout(15_000)
+      });
+      const body = await response.text();
+      if (request.attempt !== discoveryAttempt || !response.ok || !body) return;
+      await applyRoomBody(body);
+    })().catch(error => { discoveryLastError = error.message; console.error("room capture error", error.message); });
+  };
+  receiverSession.webRequest.onCompleted(filter, finish);
+  receiverSession.webRequest.onErrorOccurred(filter, finish);
+}
+
 async function capturePageBootstrap() {
-  if (!discoveryWindow || discoveryWindow.isDestroyed()) return false;
+  if (discoveryHadSnapshot || discoveryLoginRequested || !discoveryWindow || discoveryWindow.isDestroyed()) return false;
   let state;
   try {
     state = await discoveryWindow.webContents.executeJavaScript(`(() => {
@@ -196,7 +281,7 @@ async function capturePageBootstrap() {
     return false;
   }
   const bootstrap = extractPageBootstrap(state, discoveryUsername);
-  if (!bootstrap) return false;
+  if (!bootstrap || discoveryHadSnapshot || discoveryLoginRequested) return false;
   await store.beginStreamSession({
     roomId: bootstrap.roomId,
     streamId: bootstrap.streamId,
@@ -209,19 +294,13 @@ async function capturePageBootstrap() {
     name: bootstrap.host.name,
     source: bootstrap.host.source
   });
-  setDiscoveryStatus("ready", "Active · guest roster will update automatically");
-  discoveryHadSnapshot = true;
+  discoveryHasBootstrap = true;
+  setDiscoveryStatus("capturing", "LIVE found · waiting for guest roster…");
   discoveryLastError = "";
-  clearTimeout(discoveryAttentionTimer);
-  clearTimeout(discoveryRetryTimer);
-  setStatus("connected", "Active");
-  discoveryWindow.setOpacity(0);
-  discoveryWindow.setIgnoreMouseEvents(true);
-  // Keep Chromium's page lifecycle active long enough for TikTok to create its
-  // webcast worker. The window is fully transparent and absent from the taskbar.
-  setTimeout(() => {
-    if (discoveryWindow && !discoveryWindow.isDestroyed() && discoveryHadSnapshot) discoveryWindow.hide();
-  }, 8_000);
+  showLiveReceiver();
+  clearInterval(rosterRefreshTimer);
+  void refreshGuestRoster(discoveryAttempt);
+  rosterRefreshTimer = setInterval(() => void refreshGuestRoster(discoveryAttempt), 12_000);
   return true;
 }
 
@@ -234,119 +313,26 @@ function showLoginPage(detail) {
   discoveryWindow.focus();
 }
 
-async function attachDiscoveryDebugger(targetWindow) {
-  const debuggerApi = targetWindow.webContents.debugger;
-  if (discoveryDebuggerAttached && debuggerApi.isAttached()) return;
-  if (!debuggerApi.isAttached()) debuggerApi.attach("1.3");
-  await debuggerApi.sendCommand("Network.enable");
-  discoveryDebuggerAttached = true;
-  debuggerApi.on("message", (_event, method, params) => {
-    if (method === "Network.webSocketCreated" && /webcast|im\/push/i.test(params.url || "")) {
-      discoverySawSocket = true;
-      setStatus("connected", "Active");
-      return;
-    }
-    if (method === "Network.webSocketFrameReceived") {
-      void processBrowserWebSocketFrame(params).catch(error => {
-        setStatus("error", `Could not process TikTok event: ${error.message}`);
-      });
-      return;
-    }
-    if (method === "Network.responseReceived" && params.response?.url?.includes("/webcast/room/enter/")) {
-      pendingRoomResponses.add(params.requestId);
-      setDiscoveryStatus("capturing", `TikTok room response detected for @${discoveryUsername}…`);
-      return;
-    }
-    if (method !== "Network.loadingFinished" || !pendingRoomResponses.delete(params.requestId)) return;
-    captureRoomResponse(debuggerApi, params.requestId).catch(error => {
-      discoveryLastError = error.message;
-    });
-  });
-  debuggerApi.on("detach", () => {
-    discoveryDebuggerAttached = false;
-  });
-}
-
-async function readDevToolsEndpoint() {
-  const portFile = path.join(app.getPath("userData"), "DevToolsActivePort");
-  for (let attempt = 0; attempt < 30; attempt++) {
-    try {
-      const [port, wsPath] = (await readFile(portFile, "utf8")).split("\n");
-      if (port && wsPath) return { port: Number(port), path: wsPath.trim() };
-    } catch {}
-    await new Promise(resolve => setTimeout(resolve, 200));
-  }
-  throw new Error("DevTools endpoint never became available");
-}
-
-// TikTok runs its webcast push socket inside a Web Worker, which the page-level
-// debugger cannot observe. Connect as a full CDP client over the loopback debug
-// port and attach ONLY to worker targets (never pages — Electron's own
-// webContents.debugger needs those) so worker WebSocket frames are captured too.
-function startWorkerFrameCapture() {
-  readDevToolsEndpoint().then(({ port, path: wsPath }) => {
-    const client = new WebSocket(`ws://127.0.0.1:${port}${wsPath}`);
-    const trackedSessions = new Set();
-    let nextId = 1;
-    const send = (method, params = {}, sessionId) => {
-      if (client.readyState !== WebSocket.OPEN) return;
-      client.send(JSON.stringify({ id: nextId++, method, params, ...(sessionId ? { sessionId } : {}) }));
-    };
-    const isWorkerTarget = targetInfo => ["worker", "shared_worker", "service_worker"].includes(targetInfo.type);
-    const trackTarget = targetInfo => {
-      if (!isWorkerTarget(targetInfo)) return;
-      send("Target.attachToTarget", { targetId: targetInfo.targetId, flatten: true });
-    };
-    client.on("open", () => {
-      send("Target.setDiscoverTargets", { discover: true });
-      send("Target.getTargets");
-    });
-    client.on("message", raw => {
-      let message;
-      try { message = JSON.parse(raw); } catch { return; }
-      if (message.id === 2 && message.result?.targetInfos) {
-        for (const targetInfo of message.result.targetInfos) trackTarget(targetInfo);
-        return;
-      }
-      if (message.method === "Target.targetCreated") {
-        trackTarget(message.params.targetInfo);
-        return;
-      }
-      if (message.method === "Target.attachedToTarget") {
-        const { sessionId, targetInfo } = message.params;
-        if (!isWorkerTarget(targetInfo)) return;
-        trackedSessions.add(sessionId);
-        send("Network.enable", {}, sessionId);
-        return;
-      }
-      if (message.method === "Target.detachedFromTarget") {
-        trackedSessions.delete(message.params.sessionId);
-        return;
-      }
-      if (!message.sessionId || !trackedSessions.has(message.sessionId)) return;
-      if (message.method === "Network.webSocketFrameReceived") {
-        void processBrowserWebSocketFrame(message.params).catch(error => {
-          setStatus("error", `Could not process TikTok event: ${error.message}`);
-        });
-      } else if (message.method === "Network.webSocketCreated" && /webcast|im\/push/i.test(message.params.url || "")) {
-        discoverySawSocket = true;
-        setStatus("connected", "Active");
-      }
-    });
-    client.on("error", error => console.error("Worker frame capture disconnected", error.message));
-  }).catch(error => console.error("Worker frame capture unavailable", error.message));
-}
-
-async function isTikTokLoggedIn() {
-  const cookies = await session.fromPartition("persist:tiktok-scorekeeper-auth").cookies.get({ urls: ["https://www.tiktok.com"] });
-  return cookies.some(cookie => ["sessionid", "sessionid_ss"].includes(cookie.name) && Boolean(cookie.value));
-}
-
-function prepareInvisibleReceiver() {
+function showLiveReceiver() {
   if (!discoveryWindow || discoveryWindow.isDestroyed()) return;
-  discoveryWindow.setOpacity(0);
-  discoveryWindow.setIgnoreMouseEvents(true);
-  discoveryWindow.showInactive();
+  discoveryWindow.setOpacity(1);
+  discoveryWindow.setIgnoreMouseEvents(false);
+  discoveryWindow.show();
+}
+
+async function acceptComputerPlayback() {
+  if (!discoveryWindow || discoveryWindow.isDestroyed()) return false;
+  try {
+    return await discoveryWindow.webContents.executeJavaScript(`(() => {
+      const button = [...document.querySelectorAll('button, [role="button"]')]
+        .find(element => /watch on this computer/i.test(element.textContent?.trim() || ''));
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`, true);
+  } catch {
+    return false;
+  }
 }
 
 async function navigateTikTok(url) {
@@ -359,22 +345,7 @@ async function navigateTikTok(url) {
   }
 }
 
-async function withTimeout(promise, milliseconds, message) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), milliseconds);
-      })
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function pageNeedsLogin() {
-  if (!(await isTikTokLoggedIn())) return true;
   if (!discoveryWindow || discoveryWindow.isDestroyed()) return false;
   const currentUrl = discoveryWindow.webContents.getURL();
   if (/tiktok\.com\/(?:login|signup)/i.test(currentUrl)) return true;
@@ -395,10 +366,11 @@ function watchForLogin(targetUrl, attempt) {
       clearInterval(loginWatcher);
       return;
     }
-    isTikTokLoggedIn().then(async loggedIn => {
-      if (!loggedIn || attempt !== discoveryAttempt || !discoveryWindow || discoveryWindow.isDestroyed()) return;
+    pageNeedsLogin().then(async needsLogin => {
+      if (needsLogin || attempt !== discoveryAttempt || !discoveryWindow || discoveryWindow.isDestroyed()) return;
       clearInterval(loginWatcher);
-      prepareInvisibleReceiver();
+      discoveryLoginRequested = false;
+      showLiveReceiver();
       setDiscoveryStatus("capturing", `Signed in. Reading @${discoveryUsername}'s LIVE…`);
       await loadLivePage(targetUrl, attempt, 0);
     }).catch(error => {
@@ -408,7 +380,8 @@ function watchForLogin(targetUrl, attempt) {
 }
 
 async function openLogin(targetUrl, attempt) {
-  if (attempt !== discoveryAttempt || !discoveryWindow || discoveryWindow.isDestroyed()) return;
+  if (attempt !== discoveryAttempt || discoveryLoginRequested || !discoveryWindow || discoveryWindow.isDestroyed()) return;
+  discoveryLoginRequested = true;
   clearTimeout(discoveryAttentionTimer);
   clearTimeout(discoveryRetryTimer);
   showLoginPage(`Sign in to TikTok; @${discoveryUsername}'s LIVE will connect automatically`);
@@ -418,23 +391,40 @@ async function openLogin(targetUrl, attempt) {
     await navigateTikTok(loginUrl);
   } catch (error) {
     discoveryLastError = error.message;
+    clearInterval(loginWatcher);
     setDiscoveryStatus("error", "TikTok's login page could not be loaded. Use Refresh guests to retry.");
+    closeReceiverAfterRoster();
   }
 }
 
 async function finishLiveAttempt(targetUrl, attempt, retry) {
-  if (attempt !== discoveryAttempt || discoveryHadSnapshot || !discoveryWindow || discoveryWindow.isDestroyed()) return;
-  if (await pageNeedsLogin()) {
+  if (attempt !== discoveryAttempt || discoveryHadSnapshot || discoveryLoginRequested || !discoveryWindow || discoveryWindow.isDestroyed()) return;
+  if (!discoveryHasBootstrap && await pageNeedsLogin()) {
     await openLogin(targetUrl, attempt);
     return;
   }
   if (retry < 1) {
     setDiscoveryStatus("capturing", `Retrying @${discoveryUsername}'s LIVE roster…`);
-    pendingRoomResponses.clear();
     discoveryWindow.webContents.reloadIgnoringCache();
     discoveryAttentionTimer = setTimeout(() => {
       void finishLiveAttempt(targetUrl, attempt, retry + 1);
     }, 10_000);
+    return;
+  }
+
+  discoveryRetryCount++;
+  if (discoveryRetryCount >= 5) {
+    setDiscoveryStatus("error", "Guest roster unavailable after repeated attempts. Gift tracking continues; use Refresh guests or Sign in to retry.");
+    closeReceiverAfterRoster();
+    return;
+  }
+
+  if (discoveryHasBootstrap) {
+    setDiscoveryStatus("live", "LIVE active · room roster unavailable; retrying guest discovery");
+    discoveryWindow.hide();
+    discoveryRetryTimer = setTimeout(() => {
+      if (attempt === discoveryAttempt) void loadLivePage(targetUrl, attempt, 0);
+    }, 20_000);
     return;
   }
 
@@ -445,36 +435,30 @@ async function finishLiveAttempt(targetUrl, attempt, retry) {
   const offline = /live has ended|isn't live|is not live|currently offline/i.test(pageText);
   if (offline) {
     setDiscoveryStatus("error", `@${discoveryUsername} is not currently LIVE`);
-    if (connectionStatus.state !== "connected") setStatus("error", "LIVE unavailable");
-  } else if (discoverySawSocket) {
-    setDiscoveryStatus("error", "Live events are active, but TikTok did not provide the guest roster. Retrying automatically…");
+    closeReceiverAfterRoster();
+    return;
   } else {
     const suffix = discoveryLastError ? ` (${discoveryLastError})` : "";
     setDiscoveryStatus("error", `TikTok did not finish loading the LIVE. Retrying automatically…${suffix}`);
-    if (connectionStatus.state !== "connected") setStatus("connecting", "Retrying TikTok LIVE…");
   }
   discoveryWindow.hide();
   discoveryRetryTimer = setTimeout(() => {
     if (attempt !== discoveryAttempt || !discoveryWindow || discoveryWindow.isDestroyed()) return;
-    prepareInvisibleReceiver();
+    showLiveReceiver();
     void loadLivePage(targetUrl, attempt, 0);
   }, 20_000);
 }
 
 async function loadLivePage(targetUrl, attempt, retry) {
   if (attempt !== discoveryAttempt || !discoveryWindow || discoveryWindow.isDestroyed()) return;
-  prepareInvisibleReceiver();
+  showLiveReceiver();
   try {
     await navigateTikTok(targetUrl);
-    if (!discoveryDebuggerAttached && discoveryWindow && !discoveryWindow.isDestroyed()) {
-      await withTimeout(
-        attachDiscoveryDebugger(discoveryWindow),
-        5_000,
-        "TikTok event capture did not initialize"
-      );
-      discoveryWindow.webContents.reloadIgnoringCache();
-    }
-    if (await capturePageBootstrap()) return;
+    clearInterval(playbackHandoffTimer);
+    await acceptComputerPlayback();
+    playbackHandoffTimer = setInterval(() => void acceptComputerPlayback(), 2_000);
+    if (discoveryLoginRequested) return;
+    await capturePageBootstrap();
   } catch (error) {
     discoveryLastError = error.message;
   }
@@ -491,9 +475,13 @@ async function discoverGuests(username) {
   discoveryHost.handle = cleanUsername;
   const attempt = ++discoveryAttempt;
   discoveryHadSnapshot = false;
-  discoverySawSocket = false;
+  discoveryHasBootstrap = false;
+  discoveryLoginRequested = false;
   discoveryLastError = "";
-  pendingRoomResponses.clear();
+  discoveryRetryCount = 0;
+  roomCaptureRequests.clear();
+  clearInterval(rosterRefreshTimer);
+  clearInterval(playbackHandoffTimer);
   clearTimeout(discoveryAttentionTimer);
   clearTimeout(discoveryRetryTimer);
   clearInterval(loginWatcher);
@@ -521,16 +509,15 @@ async function discoverGuests(username) {
     discoveryWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     discoveryWindow.on("closed", () => {
       const unexpectedClose = !discoveryClosingIntentionally;
-      discoveryDebuggerAttached = false;
       discoveryClosingIntentionally = false;
       clearTimeout(discoveryAttentionTimer);
       clearTimeout(discoveryRetryTimer);
+      clearInterval(rosterRefreshTimer);
+      clearInterval(playbackHandoffTimer);
       clearInterval(loginWatcher);
-      pendingRoomResponses.clear();
       discoveryWindow = undefined;
       if (unexpectedClose && connection) {
-        connection = undefined;
-        setStatus("disconnected", connectionStatus.state === "connecting" ? "Sign-in cancelled" : "Disconnected");
+        setDiscoveryStatus("error", "Guest discovery window closed. Gift listening continues; use Refresh guests to retry.");
       }
     });
   }
@@ -538,17 +525,24 @@ async function discoverGuests(username) {
   discoveryClosingIntentionally = false;
   try {
     const targetUrl = `https://www.tiktok.com/@${encodeURIComponent(cleanUsername)}/live`;
-    if (!(await isTikTokLoggedIn())) {
-      await openLogin(targetUrl, attempt);
-    } else {
-      setDiscoveryStatus("capturing", `Reading @${cleanUsername}'s LIVE…`);
-      await loadLivePage(targetUrl, attempt, 0);
-    }
+    setDiscoveryStatus("capturing", `Reading @${cleanUsername}'s LIVE…`);
+    await loadLivePage(targetUrl, attempt, 0);
   } catch (error) {
     discoveryLastError = error.message;
     setDiscoveryStatus("error", `TikTok connection setup failed: ${error.message}`);
-    setStatus("error", "Connection failed");
   }
+  return sendState();
+}
+
+async function signIn(username) {
+  const cleanUsername = String(username || "").trim().replace(/^@/, "");
+  if (!/^[A-Za-z0-9._]{2,32}$/.test(cleanUsername)) throw new Error("Enter a valid TikTok username.");
+  if (!discoveryWindow || discoveryWindow.isDestroyed() || discoveryUsername !== cleanUsername) {
+    await discoverGuests(cleanUsername);
+  }
+  const targetUrl = `https://www.tiktok.com/@${encodeURIComponent(cleanUsername)}/live`;
+  discoveryLoginRequested = false;
+  await openLogin(targetUrl, discoveryAttempt);
   return sendState();
 }
 
@@ -561,8 +555,10 @@ async function connect(username) {
   const cleanUsername = String(username || "").trim().replace(/^@/, "");
   if (!/^[A-Za-z0-9._]{2,32}$/.test(cleanUsername)) throw new Error("Enter a valid TikTok username.");
 
+  giftListener.stop();
   setStatus("connecting", `Connecting to @${cleanUsername}…`);
   connection = { username: cleanUsername };
+  giftListener.start(cleanUsername);
   settings.lastUsername = cleanUsername;
   await saveSettings();
   await discoverGuests(cleanUsername);
@@ -617,12 +613,16 @@ function registerIpc() {
   });
   ipcMain.handle("stream:connect", async (event, username) => { assertTrusted(event); return connect(username); });
   ipcMain.handle("stream:discover", async (event, username) => { assertTrusted(event); return discoverGuests(username); });
+  ipcMain.handle("stream:login", async (event, username) => { assertTrusted(event); return signIn(username); });
   ipcMain.handle("stream:disconnect", async event => {
     assertTrusted(event);
     connection = undefined;
+    giftListener.stop();
     discoveryAttempt++;
     clearTimeout(discoveryAttentionTimer);
     clearTimeout(discoveryRetryTimer);
+    clearInterval(rosterRefreshTimer);
+    clearInterval(playbackHandoffTimer);
     clearInterval(loginWatcher);
     settings.lastUsername = "";
     await saveSettings();
@@ -725,7 +725,7 @@ app.whenReady().then(async () => {
   await startOverlayServer();
     registerIpc();
     createWindow();
-    startWorkerFrameCapture();
+    installRoomCapture();
     if (settings.autoConnect && settings.lastUsername) {
     setTimeout(() => connect(settings.lastUsername).catch(() => {}), 800);
   }
@@ -738,8 +738,11 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   discoveryClosingIntentionally = true;
+  giftListener.stop();
   clearTimeout(discoveryAttentionTimer);
   clearTimeout(discoveryRetryTimer);
+  clearInterval(rosterRefreshTimer);
+  clearInterval(playbackHandoffTimer);
   clearInterval(loginWatcher);
 });
 app.on("window-all-closed", () => app.quit());

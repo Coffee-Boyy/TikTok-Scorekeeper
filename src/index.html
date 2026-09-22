@@ -28,7 +28,8 @@
         <button id="tools-menu-button" class="button ghost icon-button menu-button" aria-haspopup="true" aria-expanded="false" aria-controls="tools-menu" title="Session tools: guests, overlay URL, simulate, export" aria-label="Session tools">&#8943;</button>
         <div id="tools-menu" class="popover" role="menu" aria-labelledby="tools-menu-button" hidden>
           <p class="popover-heading">Session tools</p>
-          <button class="menu-item" role="menuitem" id="discover-guests"><span>Sign in / refresh guests</span><kbd>Ctrl G</kbd></button>
+          <button class="menu-item" role="menuitem" id="discover-guests"><span>Refresh guests</span><kbd>Ctrl G</kbd></button>
+          <button class="menu-item" role="menuitem" id="sign-in"><span>Sign in to TikTok</span></button>
           <button class="menu-item" role="menuitem" id="copy-overlay"><span>Copy OBS overlay URL</span><kbd>Ctrl Shift O</kbd></button>
           <button class="menu-item" role="menuitem" id="simulate"><span>Simulate gift</span><kbd>Ctrl Shift G</kbd></button>
           <span class="popover-sep"></span>
@@ -41,6 +42,8 @@
       </div>
     </div>
   </header>
+
+  <div id="connection-alert" class="connection-alert" role="alert" hidden></div>
 
   <main>
     <section class="panel scoreboard-panel">

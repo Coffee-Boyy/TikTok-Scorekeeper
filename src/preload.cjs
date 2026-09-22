@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("scorekeeper", {
   removeRoutingRule: giftName => ipcRenderer.invoke("rules:delete", giftName),
   connect: username => ipcRenderer.invoke("stream:connect", username),
   discoverGuests: username => ipcRenderer.invoke("stream:discover", username),
+  signIn: username => ipcRenderer.invoke("stream:login", username),
   disconnect: () => ipcRenderer.invoke("stream:disconnect"),
   toggleAutoConnect: () => ipcRenderer.invoke("settings:autoconnect"),
   copyOverlay: () => ipcRenderer.invoke("overlay:copy"),

@@ -124,7 +124,11 @@ export function extractRoomRoster(response, fallbackHostHandle = "") {
   pushUsers(users, at(room, "social_interaction", "multi_live", "room_multi_guest_linkmic_info", "multi_guest_linkmic_info", "linked_users"), "room-multiguest");
   pushUsers(users, at(room, "socialInteraction", "multiLive", "roomMultiGuestLinkmicInfo", "multiGuestLinkmicInfo", "linkedUsers"), "room-multiguest");
   pushUsers(users, at(room, "link_mic", "linked_users"), "room-linkmic");
+  pushUsers(users, at(room, "link_mic", "linked_user_list"), "room-linkmic");
   pushUsers(users, at(room, "linkMic", "linkedUsers"), "room-linkmic");
+  pushUsers(users, at(room, "linkMic", "linkedUserList"), "room-linkmic");
+  pushUsers(users, at(room, "multi_guest_linkmic_info", "linked_users"), "room-multiguest-backup");
+  pushUsers(users, at(room, "multiGuestLinkmicInfo", "linkedUsers"), "room-multiguest-backup");
   pushUsers(users, at(room, "group_live_session", "group_live_members"), "room-group-live");
   pushUsers(users, at(room, "groupLiveSession", "groupLiveMembers"), "room-group-live");
 
@@ -150,6 +154,11 @@ export function extractLinkEventRoster(event, hostUserId = "", hostHandle = "") 
 
   pushUsers(users, event?.userStates || event?.user_states, "link-state");
   pushUsers(users, event?.linkedUsers || event?.linked_users, "link-method");
+  pushUsers(users, event?.linkedListChangeContent?.linkedUsers || event?.linked_list_change_content?.linked_users, "link-method");
+  pushUsers(users, event?.listChangeContent?.linkedUsers || event?.list_change_content?.linked_users, "link-method");
+  for (const group of values(event?.groupChangeContent?.groupUser?.user || event?.group_change_content?.group_user?.user)) {
+    pushUsers(users, group?.allUser?.linkedList || group?.all_user?.linked_list, "link-group");
+  }
   pushUsers(users, event?.anchorsInfo || event?.anchors_info, "link-battle");
 
   return deduplicate(users, hostUserId, hostHandle);

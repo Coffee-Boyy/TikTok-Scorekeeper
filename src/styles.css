@@ -37,8 +37,12 @@ button { font: inherit; }
 .status-pill span { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #667085; }
 .status-pill[data-state="connected"] span { background: var(--green); box-shadow: 0 0 8px rgba(73,230,154,.7); }
 .status-pill[data-state="connecting"] span { background: var(--amber); animation: pulse 1.1s ease-in-out infinite; }
+.status-pill[data-state="reconnecting"] span { background: var(--amber); animation: pulse 1.1s ease-in-out infinite; }
 .status-pill[data-state="error"] span { background: var(--pink); }
 .status-pill b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.connection-alert { padding: 9px 20px; border-bottom: 1px solid #6f5331; background: #292016; color: #ffd494; font-size: 13px; text-align: center; }
+.connection-alert[data-state="error"] { border-color: #773447; background: #2b1720; color: #ff9eb2; }
+.connection-alert[data-state="connected"] { border-color: #2a6b4b; background: #10251b; color: #8af0b9; }
 @keyframes pulse { 50% { opacity: .35; } }
 
 /* ── Buttons / popover ─────────────────────────────────────── */

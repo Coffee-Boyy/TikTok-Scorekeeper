@@ -56,6 +56,26 @@ test("keeps ID-only linked users so gifts can still be attributed", () => {
   assert.match(users[0].name, /777/);
 });
 
+test("reads TikTok's current multi-guest backup roster and excludes the host", () => {
+  const result = extractRoomRoster({ data: { multi_guest_linkmic_info: { linked_users: [
+    { user: { id_str: "100", display_id: "host", nickname: "Host" } },
+    { linkmic_id_str: "mic-2", user: { id_str: "200", display_id: "arliz", nickname: "Arliz" } }
+  ] } } }, "host");
+  assert.deepEqual(result.guests.map(user => [user.userId, user.name, user.linkMicId]), [["200", "Arliz", "mic-2"]]);
+});
+
+test("reads linked_user_list and group-change link-layer messages", () => {
+  const room = extractRoomRoster({ data: {
+    owner: { id_str: "100", display_id: "host" },
+    link_mic: { linked_user_list: [{ user: { id_str: "200", display_id: "arliz" } }] }
+  } });
+  assert.equal(room.guests[0].handle, "arliz");
+  const event = extractLinkEventRoster({ groupChangeContent: { groupUser: { user: [
+    { allUser: { linkedList: [{ user: { userId: "100" } }, { user: { userId: "200" }, linkmicId: "mic-2" }] } }
+  ] } } }, "100", "host");
+  assert.deepEqual(event.map(user => user.userId), ["200"]);
+});
+
 test("extracts Group LIVE members used by agency-style streams", () => {
   const result = extractRoomRoster({
     data: {

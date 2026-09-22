@@ -39,11 +39,20 @@ function render(next) {
 
   const connectButton = byId("connect");
   const connected = state.connection.state === "connected";
-  const connecting = state.connection.state === "connecting";
-  connectButton.textContent = connected ? "Disconnect" : connecting ? "Connecting…" : "Connect";
-  connectButton.classList.toggle("success", !connected);
-  connectButton.classList.toggle("danger", connected);
-  connectButton.disabled = connecting;
+  const active = connected || state.connection.state === "connecting" || state.connection.state === "reconnecting";
+  connectButton.textContent = active ? "Disconnect" : "Connect";
+  connectButton.classList.toggle("success", !active);
+  connectButton.classList.toggle("danger", active);
+  const alert = byId("connection-alert");
+  const connectionAlert = state.connection.state === "reconnecting" || state.connection.state === "error" ||
+    (connected && /restored/i.test(state.connection.detail));
+  const discoveryAlert = state.discovery?.state === "error";
+  const showAlert = connectionAlert || discoveryAlert;
+  alert.hidden = !showAlert;
+  if (showAlert) {
+    alert.dataset.state = connectionAlert ? state.connection.state : "error";
+    alert.textContent = connectionAlert ? state.connection.detail : `Guest discovery: ${state.discovery.detail}`;
+  }
 
   const discovery = byId("discovery-status");
   discovery.dataset.state = state.discovery?.state || "idle";
@@ -193,10 +202,11 @@ document.addEventListener("keydown", event => {
 });
 
 byId("connect").addEventListener("click", () => {
-  if (state?.connection.state === "connected") perform(() => window.scorekeeper.disconnect());
+  if (["connected", "connecting", "reconnecting"].includes(state?.connection.state)) perform(() => window.scorekeeper.disconnect());
   else perform(() => window.scorekeeper.connect(byId("username").value));
 });
 byId("discover-guests").addEventListener("click", () => perform(() => window.scorekeeper.discoverGuests(byId("username").value)));
+byId("sign-in").addEventListener("click", () => perform(() => window.scorekeeper.signIn(byId("username").value)));
 byId("copy-overlay").addEventListener("click", () => perform(() => window.scorekeeper.copyOverlay(), "OBS overlay URL copied."));
 byId("simulate").addEventListener("click", () => perform(() => window.scorekeeper.simulateGift(), "Test gift recorded."));
 byId("show-small").addEventListener("click", () => {
