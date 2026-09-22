@@ -6,7 +6,8 @@ const STREAK_WINDOW_MS = 30_000;
 
 function giftCorrelationKey(event) {
   const sender = event.sender?.userId || event.sender?.handle || event.sender?.name || "unknown";
-  const recipient = event.recipient?.userId || event.recipient?.name || event.participantId || "unassigned";
+  const recipient = event.recipient?.userId || event.recipient?.name ||
+    (event.assignmentMethod === "active-dancer" ? "unassigned" : event.participantId || "unassigned");
   return `${sender}|${event.gift?.id || event.gift?.name || "unknown"}|${recipient}`.toLowerCase();
 }
 
@@ -80,6 +81,12 @@ export class ShowStore {
       }
       const collapsed = collapseCompletedStreakUpdates(this.show.gifts || []);
       this.show.gifts = collapsed.gifts;
+      if (this.show.activeDancerId && !this.show.participants.some(item => item.id === this.show.activeDancerId && item.role === "guest")) {
+        this.show.activeDancerId = null;
+        migrated++;
+      }
+      const duplicateHostsRemoved = this.removeDuplicateHostGuests();
+      const hostGiftsMoved = this.moveHostGiftsToUnassigned();
       const detectedRecipients = this.show.gifts
         .map(event => event.recipient)
         .filter(recipient => recipient && ((recipient.userId && recipient.userId !== "0") || recipient.name))
@@ -90,7 +97,7 @@ export class ShowStore {
         }));
       if (detectedRecipients.length) {
         await this.upsertDiscoveredParticipants(detectedRecipients);
-      } else if (collapsed.removed || migrated) {
+      } else if (collapsed.removed || migrated || hostGiftsMoved || duplicateHostsRemoved) {
         await this.persist();
       }
     } catch (error) {
@@ -116,6 +123,7 @@ export class ShowStore {
       createdAt: new Date().toISOString(),
       streamSessionId: "",
       segments: [],
+      activeDancerId: null,
       participants: cleanHost ? [{
         id: crypto.randomUUID(),
         name: cleanHost,
@@ -194,10 +202,43 @@ export class ShowStore {
   }
 
   resolveRuleGuest(guest) {
-    return this.show?.participants.find(item =>
-      (guest.handle && item.handle?.toLowerCase() === guest.handle.toLowerCase()) ||
-      (guest.name && item.name?.toLowerCase() === guest.name.toLowerCase())
-    );
+    const multiGuest = this.show?.participants.some(item => item.role === "guest");
+    return this.show?.participants.find(item => {
+      if (multiGuest && item.role === "host") return false;
+      return (guest.handle && item.handle?.toLowerCase() === guest.handle.toLowerCase()) ||
+        (guest.name && item.name?.toLowerCase() === guest.name.toLowerCase());
+    });
+  }
+
+  moveHostGiftsToUnassigned() {
+    if (!this.show?.participants.some(item => item.role === "guest")) return 0;
+    const hostIds = new Set(this.show.participants.filter(item => item.role === "host").map(item => item.id));
+    let moved = 0;
+    for (const event of this.show.gifts) {
+      if (!hostIds.has(event.participantId)) continue;
+      event.participantId = null;
+      event.assignmentMethod = "unassigned";
+      moved++;
+    }
+    return moved;
+  }
+
+  removeDuplicateHostGuests() {
+    const host = this.show?.participants.find(item => item.role === "host");
+    if (!host) return 0;
+    const duplicates = this.show.participants.filter(item => item.role === "guest" &&
+      ((host.tiktokUserId && item.tiktokUserId === host.tiktokUserId) ||
+        (host.handle && item.handle?.toLowerCase() === host.handle.toLowerCase())));
+    if (!duplicates.length) return 0;
+    const duplicateIds = new Set(duplicates.map(item => item.id));
+    this.show.participants = this.show.participants.filter(item => !duplicateIds.has(item.id));
+    if (duplicateIds.has(this.show.activeDancerId)) this.show.activeDancerId = null;
+    for (const event of this.show.gifts) {
+      if (!duplicateIds.has(event.participantId)) continue;
+      event.participantId = null;
+      event.assignmentMethod = "unassigned";
+    }
+    return duplicates.length;
   }
 
   routeEvents(events) {
@@ -228,6 +269,7 @@ export class ShowStore {
     const cleanGift = String(giftName || "").trim();
     if (!cleanGift) throw new Error("Enter a gift name.");
     if (!participant) throw new Error("Choose a guest to receive this gift.");
+    if (participant.role === "host" && this.show.participants.some(item => item.role === "guest")) throw new Error("The host cannot receive routed gifts in a multi-guest show.");
     this.routingRules[cleanGift.toLowerCase()] = {
       giftName: cleanGift,
       guest: { name: String(participant.name || ""), handle: String(participant.handle || "") }
@@ -271,6 +313,7 @@ export class ShowStore {
       role: "guest"
     };
     this.show.participants.push(participant);
+    this.moveHostGiftsToUnassigned();
     await this.persist();
     return this.snapshot();
   }
@@ -282,6 +325,8 @@ export class ShowStore {
     if (input.handle) host.handle = String(input.handle).replace(/^@/, "");
     if (input.userId) host.tiktokUserId = String(input.userId);
     host.discoverySource = input.source || host.discoverySource;
+    this.removeDuplicateHostGuests();
+    this.moveHostGiftsToUnassigned();
     await this.persist();
     return this.snapshot();
   }
@@ -317,6 +362,7 @@ export class ShowStore {
         updated++;
       }
     }
+    const hostGiftsMoved = this.moveHostGiftsToUnassigned();
     let reassigned = 0;
     for (const event of this.show.gifts) {
       if (event.participantId || (!event.recipient?.userId && !event.recipient?.name)) continue;
@@ -331,12 +377,13 @@ export class ShowStore {
       }
     }
     const routed = this.routeEvents(this.show.gifts);
-    if (added || updated || reassigned || routed) await this.persist();
+    if (added || updated || reassigned || routed || hostGiftsMoved) await this.persist();
     return { added, updated: updated + routed, reassigned, snapshot: this.snapshot() };
   }
 
   async removeParticipant(participantId) {
     this.show.participants = this.show.participants.filter(item => item.id !== participantId);
+    if (this.show.activeDancerId === participantId) this.show.activeDancerId = null;
     for (const event of this.show.gifts) {
       if (event.participantId === participantId) {
         event.participantId = null;
@@ -348,6 +395,11 @@ export class ShowStore {
   }
 
   async recordGift(normalized, raw) {
+    if (this.show.participants.some(item => item.role === "guest") &&
+      this.show.participants.some(item => item.role === "host" && item.id === normalized.participantId)) {
+      normalized.participantId = null;
+      normalized.assignmentMethod = "unassigned";
+    }
     const duplicateIndex = normalized.sourceMessageId
       ? this.show.gifts.findIndex(event => event.sourceMessageId === normalized.sourceMessageId)
       : -1;
@@ -356,15 +408,27 @@ export class ShowStore {
       : -1;
     const existingIndex = duplicateIndex >= 0 ? duplicateIndex : pendingStreakIndex;
     if (existingIndex >= 0) {
-      normalized.id = this.show.gifts[existingIndex].id;
+      const existing = this.show.gifts[existingIndex];
+      normalized.id = existing.id;
+      if (existing.assignmentMethod === "manual" || (!normalized.participantId && existing.assignmentMethod === "active-dancer")) {
+        normalized.participantId = existing.participantId;
+        normalized.assignmentMethod = existing.assignmentMethod;
+      }
       this.show.gifts.splice(existingIndex, 1);
     }
     const rule = this.routingRules[String(normalized.gift?.name || "").toLowerCase()];
-    if (rule) {
+    if (rule && normalized.assignmentMethod !== "manual") {
       const routedTo = this.resolveRuleGuest(rule.guest);
       if (routedTo) {
         normalized.participantId = routedTo.id;
         normalized.assignmentMethod = "rule";
+      }
+    }
+    if (!normalized.participantId && normalized.assignmentMethod !== "manual") {
+      const dancer = this.show.participants.find(item => item.id === this.show.activeDancerId && item.role === "guest");
+      if (dancer) {
+        normalized.participantId = dancer.id;
+        normalized.assignmentMethod = "active-dancer";
       }
     }
     this.show.gifts.unshift(normalized);
@@ -381,13 +445,43 @@ export class ShowStore {
   }
 
   async assignGift(eventId, participantId) {
-    const event = this.show.gifts.find(item => item.id === eventId);
-    if (!event) throw new Error("Gift event not found");
+    return this.assignGifts([eventId], participantId);
+  }
+
+  async setActiveDancer(participantId) {
+    if (participantId !== null && participantId !== "" &&
+      !this.show.participants.some(item => item.id === participantId && item.role === "guest")) {
+      throw new Error("Choose a guest to be the active dancer.");
+    }
+    const previous = this.show.activeDancerId || null;
+    this.show.activeDancerId = participantId || null;
+    try {
+      await this.persist();
+    } catch (error) {
+      this.show.activeDancerId = previous;
+      throw error;
+    }
+    return this.snapshot();
+  }
+
+  async assignGifts(eventIds, participantId) {
+    if (!Array.isArray(eventIds) || !eventIds.length || eventIds.length > 300 ||
+      eventIds.some(id => typeof id !== "string" || !id)) throw new Error("Select 1 to 300 gift events.");
+    const ids = new Set(eventIds);
+    if (ids.size !== eventIds.length) throw new Error("Duplicate gift events were selected.");
+    const events = eventIds.map(id => this.show.gifts.find(item => item.id === id));
+    if (events.some(event => !event)) throw new Error("A selected gift event was not found. Refresh the list and try again.");
     if (participantId && !this.show.participants.some(item => item.id === participantId)) {
       throw new Error("Participant not found");
     }
-    event.participantId = participantId || null;
-    event.assignmentMethod = "manual";
+    if (this.show.participants.some(item => item.role === "guest") &&
+      this.show.participants.some(item => item.role === "host" && item.id === participantId)) {
+      throw new Error("Host gifts stay unassigned in a multi-guest show.");
+    }
+    for (const event of events) {
+      event.participantId = participantId || null;
+      event.assignmentMethod = "manual";
+    }
     await this.persist();
     return this.snapshot();
   }

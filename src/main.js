@@ -1,7 +1,6 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, session } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session } from "electron";
 import { createServer } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
-import { watch } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
@@ -9,9 +8,13 @@ import { TikTokLiveConnection } from "tiktok-live-connector";
 import { extractRecipient, jsonSafe, normalizeGift } from "./gifts.js";
 import { extractLinkEventRoster, extractPageBootstrap, extractRoomRoster } from "./guests.js";
 import { ShowStore } from "./store.js";
-import { GiftConnection } from "./gift-connection.js";
+import { GiftConnection, configureSigningKey } from "./gift-connection.js";
+import { loadEulerApiKey, saveEulerApiKey } from "./euler-key.js";
+import { loadSigningCooldown, saveSigningCooldown, signingIdentity } from "./signing-cooldown.js";
+import { DEFAULT_SETTINGS, formatRanking, publicSettings, shouldPlayGiftSound, validateEulerApiKeyChange, validateSettingsPatch } from "./settings.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 const PORT = 17342;
 let window;
 let connection;
@@ -34,7 +37,11 @@ let rosterRefreshTimer;
 let rosterRefreshInProgress = false;
 let playbackHandoffTimer;
 let loginWatcher;
-let settings = { autoConnect: true, lastUsername: "" };
+let settings = { ...DEFAULT_SETTINGS };
+let eulerApiKey = "";
+let eulerApiKeyError = "";
+let signingCooldownUntil = 0;
+const missedGiftIds = new Set();
 const roomCaptureRequests = new Map();
 const overlayClients = new Set();
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -56,17 +63,43 @@ function assertTrusted(event) {
 }
 
 const settingsPath = () => path.join(app.getPath("userData"), "settings.json");
+const eulerApiKeyPath = () => path.join(app.getPath("userData"), "euler-api-key.bin");
+const signingCooldownPath = () => path.join(app.getPath("userData"), "signing-cooldown.json");
+const activeSigningIdentity = () => signingIdentity(eulerApiKey || process.env.SIGN_API_KEY || "");
+
+function setSigningCooldown(retryAt) {
+  signingCooldownUntil = retryAt;
+  try {
+    saveSigningCooldown(signingCooldownPath(), activeSigningIdentity(), retryAt);
+  } catch (error) {
+    console.error("Could not persist signing cooldown", error);
+    if (retryAt) dialog.showErrorBox("Signing cooldown could not be saved", "Avoid restarting the app until the signing service retry time has passed, or it may consume another signing request.");
+  }
+}
 
 async function loadSettings() {
   try {
-    settings = { ...settings, ...JSON.parse(await readFile(settingsPath(), "utf8")) };
+    settings = { ...DEFAULT_SETTINGS, ...JSON.parse(await readFile(settingsPath(), "utf8")) };
   } catch (error) {
     if (error.code !== "ENOENT") console.error("Could not read settings", error);
   }
 }
 
-async function saveSettings() {
-  await writeFile(settingsPath(), JSON.stringify(settings, null, 2), "utf8");
+async function saveSettings(next = settings) {
+  await writeFile(settingsPath(), JSON.stringify(next, null, 2), "utf8");
+}
+
+async function loadSigningKey() {
+  try {
+    eulerApiKey = await loadEulerApiKey(eulerApiKeyPath(), safeStorage);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error("Could not unlock Euler Stream API key", error);
+      eulerApiKeyError = "Saved Euler Stream API key could not be unlocked. Enter it again.";
+    }
+  }
+  configureSigningKey(eulerApiKey);
+  signingCooldownUntil = loadSigningCooldown(signingCooldownPath(), activeSigningIdentity());
 }
 
 function broadcastOverlay() {
@@ -77,11 +110,19 @@ function broadcastOverlay() {
 }
 
 function sendState() {
+  const snapshot = store.snapshot();
+  const currentGiftIds = new Set(snapshot.show.gifts.map(gift => gift.id));
+  for (const id of missedGiftIds) if (!currentGiftIds.has(id)) missedGiftIds.delete(id);
   const payload = {
-    ...store.snapshot(),
+    ...snapshot,
     connection: connectionStatus,
     discovery: discoveryStatus,
-    settings: { autoConnect: settings.autoConnect },
+    missedGiftIds: [...missedGiftIds],
+    settings: {
+      ...publicSettings(settings),
+      eulerApiKeySource: eulerApiKey ? "saved" : process.env.SIGN_API_KEY ? "environment" : "none",
+      eulerApiKeyError
+    },
     overlayUrl: `http://127.0.0.1:${PORT}/overlay`
   };
   window?.webContents.send("state:changed", payload);
@@ -132,11 +173,21 @@ async function ingestGift(rawGift) {
     }]);
   }
   const normalized = normalizeGift(safeRaw, store.show.participants);
+  const alreadyCompleted = normalized.sourceMessageId && store.show.gifts.some(event =>
+    event.sourceMessageId === normalized.sourceMessageId && event.scoreable);
   await store.recordGift(normalized, safeRaw);
+  if (!window?.isVisible() || !window.isFocused()) missedGiftIds.add(normalized.id);
+  if (shouldPlayGiftSound(normalized, settings, alreadyCompleted)) {
+    window?.webContents.send("gift:sound", settings.giftSound);
+  }
   sendState();
 }
 
 const giftListener = new GiftConnection({
+  shouldReconnect: () => settings.autoReconnect,
+  getCooldownUntil: () => signingCooldownUntil,
+  onRateLimit: setSigningCooldown,
+  onConnected: () => setSigningCooldown(0),
   onStatus: (state, detail) => setStatus(state, detail),
   onRoom: (roomId, username) => store.beginStreamSession({ roomId, hostUsername: username }),
   onGift: ingestGift,
@@ -534,18 +585,6 @@ async function discoverGuests(username) {
   return sendState();
 }
 
-async function signIn(username) {
-  const cleanUsername = String(username || "").trim().replace(/^@/, "");
-  if (!/^[A-Za-z0-9._]{2,32}$/.test(cleanUsername)) throw new Error("Enter a valid TikTok username.");
-  if (!discoveryWindow || discoveryWindow.isDestroyed() || discoveryUsername !== cleanUsername) {
-    await discoverGuests(cleanUsername);
-  }
-  const targetUrl = `https://www.tiktok.com/@${encodeURIComponent(cleanUsername)}/live`;
-  discoveryLoginRequested = false;
-  await openLogin(targetUrl, discoveryAttempt);
-  return sendState();
-}
-
 function setStatus(state, detail) {
   connectionStatus = { state, detail };
   sendState();
@@ -600,6 +639,9 @@ async function startOverlayServer() {
 function registerIpc() {
   ipcMain.handle("app:state", event => { assertTrusted(event); return sendState(); });
   ipcMain.handle("gift:assign", async (event, giftId, participantId) => { assertTrusted(event); await store.assignGift(giftId, participantId); return sendState(); });
+  ipcMain.handle("gift:assign-many", async (event, giftIds, participantId) => { assertTrusted(event); await store.assignGifts(giftIds, participantId); return sendState(); });
+  ipcMain.handle("gift:clear-missed", event => { assertTrusted(event); missedGiftIds.clear(); return sendState(); });
+  ipcMain.handle("dancer:set", async (event, participantId) => { assertTrusted(event); await store.setActiveDancer(participantId); return sendState(); });
   ipcMain.handle("rules:set", async (event, giftName, participantId) => {
     assertTrusted(event);
     const participant = store.show.participants.find(item => item.id === participantId);
@@ -613,7 +655,6 @@ function registerIpc() {
   });
   ipcMain.handle("stream:connect", async (event, username) => { assertTrusted(event); return connect(username); });
   ipcMain.handle("stream:discover", async (event, username) => { assertTrusted(event); return discoverGuests(username); });
-  ipcMain.handle("stream:login", async (event, username) => { assertTrusted(event); return signIn(username); });
   ipcMain.handle("stream:disconnect", async event => {
     assertTrusted(event);
     connection = undefined;
@@ -639,30 +680,43 @@ function registerIpc() {
     await saveSettings();
     return sendState();
   });
+  ipcMain.handle("settings:update", async (event, patch) => {
+    assertTrusted(event);
+    const { eulerApiKey: keyInput, removeEulerApiKey, ...preferences } = patch || {};
+    const keyChange = validateEulerApiKeyChange(keyInput, removeEulerApiKey);
+    const next = { ...settings, ...validateSettingsPatch(preferences) };
+    if (keyChange.action !== "keep") {
+      const key = keyChange.action === "save" ? keyChange.key : "";
+      await saveEulerApiKey(eulerApiKeyPath(), key, safeStorage);
+      eulerApiKey = key;
+      eulerApiKeyError = "";
+      configureSigningKey(key);
+      setSigningCooldown(0);
+    }
+    await saveSettings(next);
+    settings = next;
+    if (keyChange.action !== "keep" && connection?.username && ["connecting", "reconnecting"].includes(connectionStatus.state)) {
+      giftListener.start(connection.username);
+    }
+    return sendState();
+  });
+  ipcMain.handle("settings:preview-ranking", (event, patch) => {
+    assertTrusted(event);
+    return formatRanking(store.snapshot().scores, { ...settings, ...validateSettingsPatch(patch) });
+  });
+  ipcMain.handle("ranking:copy", event => {
+    assertTrusted(event);
+    const scores = store.snapshot().scores;
+    if (!scores.some(score => score.participant?.role === "guest")) throw new Error("No guests to include in the ranking yet.");
+    const comment = formatRanking(scores, settings);
+    clipboard.writeText(comment);
+    return comment;
+  });
   ipcMain.handle("overlay:copy", event => {
     assertTrusted(event);
     const url = `http://127.0.0.1:${PORT}/overlay`;
     clipboard.writeText(url);
     return url;
-  });
-  ipcMain.handle("gift:simulate", async event => {
-    assertTrusted(event);
-    const participant = store.show.participants[Math.floor(Math.random() * Math.max(store.show.participants.length, 1))];
-    const raw = {
-      msgId: `simulation-${crypto.randomUUID()}`,
-      user: { userId: "demo-viewer", uniqueId: "demo_viewer", nickname: "Demo Viewer" },
-      giftId: "5655",
-      giftDetails: { giftName: "Rose", giftType: 0, diamondCount: 1 },
-      receiverUserId: participant?.tiktokUserId || undefined,
-      receiver: participant ? { uniqueId: participant.handle } : undefined,
-      repeatCount: Math.ceil(Math.random() * 5),
-      repeatEnd: true
-    };
-    const normalized = normalizeGift(raw, store.show.participants);
-    normalized.assignmentMethod = participant ? "simulation" : normalized.assignmentMethod;
-    normalized.participantId = participant?.id || normalized.participantId;
-    await store.recordGift(normalized, raw);
-    return sendState();
   });
   ipcMain.handle("show:export", async event => {
     assertTrusted(event);
@@ -677,23 +731,6 @@ function registerIpc() {
   });
 }
 
-function enableHotReload(targetWindow) {
-  if (app.isPackaged) return;
-  let debounce;
-  watch(directory, { recursive: true }, (_event, filename) => {
-    if (!filename) return;
-    clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      if (/(index\.html|styles\.css|renderer\.js|gift-catalog\.js|overlay\.html)$/.test(filename)) {
-        targetWindow.webContents.reload();
-      } else if (/\.(js|cjs|mjs)$/.test(filename)) {
-        app.relaunch();
-        app.exit(0);
-      }
-    }, 120);
-  });
-}
-
 function createWindow() {
   window = new BrowserWindow({
     width: 1180,
@@ -702,7 +739,8 @@ function createWindow() {
     minHeight: 620,
     backgroundColor: "#0a0d13",
     titleBarStyle: "hidden",
-    titleBarOverlay: { color: "#0c1017", symbolColor: "#e8eaf0", height: 52 },
+    // Keep native controls; CSS titlebar-area variables reserve their actual position.
+    titleBarOverlay: { color: "#0c1017", symbolColor: "#e8eaf0", height: 53 },
     webPreferences: {
       preload: path.join(directory, "preload.cjs"),
       nodeIntegration: false,
@@ -714,12 +752,13 @@ function createWindow() {
   window.loadFile(path.join(directory, "index.html"));
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", event => event.preventDefault());
-  enableHotReload(window);
+  window.on("focus", sendState);
 }
 
 if (hasSingleInstanceLock) {
 app.whenReady().then(async () => {
   await loadSettings();
+  await loadSigningKey();
   store = new ShowStore(path.join(app.getPath("userData"), "shows"));
   await store.initialize();
   await startOverlayServer();

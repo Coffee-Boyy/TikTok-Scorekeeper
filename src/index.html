@@ -25,17 +25,13 @@
       <input id="username" aria-label="Host username" autocomplete="off" placeholder="@creator">
       <button id="connect" class="button success">Connect</button>
       <div class="menu-anchor">
-        <button id="tools-menu-button" class="button ghost icon-button menu-button" aria-haspopup="true" aria-expanded="false" aria-controls="tools-menu" title="Session tools: guests, overlay URL, simulate, export" aria-label="Session tools">&#8943;</button>
+        <button id="tools-menu-button" class="button ghost icon-button menu-button" aria-haspopup="true" aria-expanded="false" aria-controls="tools-menu" title="Session tools: guests, overlay URL, settings, export" aria-label="Session tools">&#8943;</button>
         <div id="tools-menu" class="popover" role="menu" aria-labelledby="tools-menu-button" hidden>
           <p class="popover-heading">Session tools</p>
           <button class="menu-item" role="menuitem" id="discover-guests"><span>Refresh guests</span><kbd>Ctrl G</kbd></button>
-          <button class="menu-item" role="menuitem" id="sign-in"><span>Sign in to TikTok</span></button>
           <button class="menu-item" role="menuitem" id="copy-overlay"><span>Copy OBS overlay URL</span><kbd>Ctrl Shift O</kbd></button>
-          <button class="menu-item" role="menuitem" id="simulate"><span>Simulate gift</span><kbd>Ctrl Shift G</kbd></button>
           <span class="popover-sep"></span>
-          <button class="menu-item" role="menuitemcheckbox" aria-checked="false" id="show-small"><span>Show small gifts (&lt;10)</span><kbd>Ctrl Shift H</kbd></button>
-          <button class="menu-item" role="menuitemcheckbox" aria-checked="true" id="auto-connect"><span>Auto-connect on launch</span><kbd>Ctrl Shift A</kbd></button>
-          <button class="menu-item" role="menuitem" id="routing"><span>Gift routing rules</span><kbd>Ctrl Shift R</kbd></button>
+          <button class="menu-item" role="menuitem" id="settings"><span>Settings</span><kbd>Ctrl ,</kbd></button>
           <span class="popover-sep"></span>
           <button class="menu-item" role="menuitem" id="export"><span>Export CSV</span><kbd>Ctrl E</kbd></button>
         </div>
@@ -49,6 +45,12 @@
     <section class="panel scoreboard-panel">
       <div class="section-heading">
         <h2 class="white-title">Scoreboard</h2>
+        <div class="menu-anchor scoreboard-menu-anchor">
+          <button id="scoreboard-menu-button" class="button ghost icon-button menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="scoreboard-menu" aria-label="Scoreboard options" title="Scoreboard options">&#8943;</button>
+          <div id="scoreboard-menu" class="popover" role="menu" aria-labelledby="scoreboard-menu-button" hidden>
+            <button id="copy-ranking" class="menu-item" type="button" role="menuitem">Copy formatted ranking comment</button>
+          </div>
+        </div>
       </div>
       <div id="scoreboard" class="scoreboard"></div>
     </section>
@@ -60,13 +62,21 @@
           <div id="event-filters" class="filters" role="group" aria-label="Filter events">
             <button class="chip" type="button" data-filter="all" aria-pressed="true">All <b id="count-all">0</b></button>
             <button class="chip" type="button" data-filter="unassigned" aria-pressed="false">Needs review <b id="count-review">0</b></button>
+            <button class="chip" type="button" data-filter="missed" aria-pressed="false" hidden>Missed <b id="count-missed">0</b></button>
           </div>
+          <button id="clear-missed" class="text-action" type="button" hidden>Mark missed as seen</button>
           <span id="event-count" class="counter">0 events</span>
         </div>
       </div>
+      <div id="bulk-actions" class="bulk-actions is-inactive">
+        <span id="selected-count">Select gifts to assign</span>
+        <select id="bulk-recipient" aria-label="Recipient for selected gifts" disabled><option value="__choose__">Choose recipient…</option></select>
+        <button id="bulk-apply" class="button success" type="button" disabled>Assign selected</button>
+        <button id="bulk-clear" class="button ghost" type="button" disabled>Clear selection</button>
+      </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Time</th><th>Viewer</th><th>Gift</th><th>Qty</th><th>Points</th><th>Recipient</th></tr></thead>
+          <thead><tr><th class="select-column"><input id="select-visible" type="checkbox" aria-label="Select all displayed gift events"></th><th>Time</th><th>Viewer</th><th>Gift</th><th>Qty</th><th>Points</th><th>Recipient</th></tr></thead>
           <tbody id="events"></tbody>
         </table>
       </div>
@@ -79,10 +89,55 @@
     <span class="statusbar-item">Overlay 127.0.0.1:17342/overlay</span>
   </footer>
 
-  <dialog id="routing-dialog" class="modal" aria-labelledby="routing-title">
+  <dialog id="settings-dialog" class="modal settings-modal" aria-labelledby="settings-title">
     <div class="modal-body">
-      <h2 id="routing-title">Gift routing</h2>
-      <p class="modal-sub">Always credit a specific gift to a guest, even when it's sent to someone else.</p>
+      <h2 id="settings-title">Settings</h2>
+      <div class="settings-tabs" role="tablist" aria-label="Settings categories">
+        <button id="settings-tab-connection" class="settings-tab" type="button" role="tab" aria-controls="settings-panel-connection" aria-selected="true" tabindex="0">Connection</button>
+        <button id="settings-tab-gifts" class="settings-tab" type="button" role="tab" aria-controls="settings-panel-gifts" aria-selected="false" tabindex="-1">Gifts</button>
+        <button id="settings-tab-names" class="settings-tab" type="button" role="tab" aria-controls="settings-panel-names" aria-selected="false" tabindex="-1">Guest names</button>
+        <button id="settings-tab-ranking" class="settings-tab" type="button" role="tab" aria-controls="settings-panel-ranking" aria-selected="false" tabindex="-1">Ranking</button>
+        <button id="settings-tab-routing" class="settings-tab" type="button" role="tab" aria-controls="settings-panel-routing" aria-selected="false" tabindex="-1">Routing</button>
+      </div>
+      <div class="settings-panels">
+      <section id="settings-panel-connection" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-connection">
+        <h3 id="connection-settings-title">Connection</h3>
+        <label class="settings-check"><input id="setting-auto-connect" type="checkbox"> Auto-connect to the last stream on launch</label>
+        <label class="settings-check"><input id="setting-auto-reconnect" type="checkbox"> Reconnect if the gift connection drops</label>
+        <div class="settings-key">
+          <label class="settings-stack" for="setting-euler-key">Euler Stream API key
+            <input id="setting-euler-key" type="password" maxlength="2048" autocomplete="new-password" spellcheck="false" placeholder="Paste an API key">
+          </label>
+          <p id="euler-key-status" class="settings-help"></p>
+          <label id="remove-euler-key-label" class="settings-check" hidden><input id="setting-remove-euler-key" type="checkbox"> Remove saved API key</label>
+          <p class="settings-help">Saved encrypted on this computer. A new key is used on the next connection, or immediately if the listener is retrying.</p>
+        </div>
+      </section>
+      <section id="settings-panel-gifts" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-gifts" hidden>
+        <h3 id="gift-settings-title">Gift events</h3>
+        <label class="settings-field">Hide gifts worth less than <input id="setting-min-coins" type="number" min="0" max="1000000" step="1" required aria-label="Minimum gift value in coins"> coins</label>
+        <p class="settings-help">0 shows all gifts. Hidden gifts still count toward scores.</p>
+        <label class="settings-check"><input id="setting-gift-sound" type="checkbox"> Play a sound when a completed gift arrives</label>
+        <div class="settings-inline"><label class="settings-stack" for="setting-sound-type">Gift sound
+          <select id="setting-sound-type"><option value="ding">Ding</option><option value="chime">Chime</option><option value="pop">Pop</option></select>
+        </label><button id="test-gift-sound" type="button" class="button ghost">Test sound</button></div>
+      </section>
+      <section id="settings-panel-names" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-names" hidden>
+        <h3 id="names-settings-title">Guest names in ranking comments</h3>
+        <p class="settings-help">Give each guest a short name. Their scoreboard name stays unchanged.</p>
+        <div id="guest-aliases" class="guest-aliases"></div>
+      </section>
+      <section id="settings-panel-ranking" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-ranking" hidden>
+        <h3 id="comment-settings-title">Ranking comment format</h3>
+        <label class="settings-stack">Comment template <input id="setting-ranking-template" type="text" maxlength="240" required></label>
+        <label class="settings-stack">Guest entry <input id="setting-ranking-entry" type="text" maxlength="120" required></label>
+        <label class="settings-stack">Separator <input id="setting-ranking-separator" type="text" maxlength="30"></label>
+        <p class="settings-help">Use {rankings} in the comment and {name}, {score}, or {rank} in each entry. Scores use k and m for large values.</p>
+        <div class="ranking-preview"><span>Preview</span><output id="ranking-preview">No guests yet</output></div>
+      </section>
+      <section id="settings-panel-routing" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-routing" hidden>
+      <h3 id="routing-title">Gift routing rules</h3>
+      <p class="settings-help">Always credit a specific gift to a guest, even when sent to someone else. Rule changes save immediately.</p>
       <ul id="routing-list" class="routing-list"></ul>
       <form id="routing-form" class="routing-form">
         <div class="routing-row">
@@ -93,8 +148,12 @@
           <button class="button success" type="submit">Add rule</button>
         </div>
       </form>
+      </section>
+      </div>
       <div class="modal-actions">
-        <button id="routing-close" class="button ghost" type="button" autofocus>Done</button>
+        <p id="settings-error" class="settings-error" role="alert" hidden></p>
+        <button id="settings-cancel" class="button ghost" type="button">Cancel</button>
+        <button id="settings-save" class="button success" type="button">Save settings</button>
       </div>
     </div>
     <ul id="gift-list" class="combo-list" role="listbox" popover="manual"></ul>

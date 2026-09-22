@@ -2,6 +2,7 @@ import {
   AuthenticatedWebSocketConnectionError,
   InvalidUniqueIdError,
   PremiumFeatureError,
+  SignConfig,
   SignatureRateLimitError,
   TikTokLiveConnection,
   UserOfflineError
@@ -9,6 +10,11 @@ import {
 
 const CONNECT_TIMEOUT_MS = 25_000;
 const MAX_RETRY_MS = 60_000;
+
+export function configureSigningKey(key) {
+  SignConfig.apiKey = key || process.env.SIGN_API_KEY || undefined;
+  SignConfig.cachedInstance = undefined;
+}
 
 export function connectionFailure(error) {
   if (error instanceof UserOfflineError) return { fatal: true, detail: "The host is no longer LIVE. Connect again when the next stream starts." };
@@ -23,7 +29,7 @@ export function connectionFailure(error) {
 }
 
 export class GiftConnection {
-  constructor({ onStatus, onRoom, onGift, onLink, onLinkError, onFatal, onRecovered, createClient = username => new TikTokLiveConnection(username, {
+  constructor({ onStatus, onRoom, onGift, onLink, onLinkError, onFatal, onRecovered, onRateLimit = () => {}, onConnected = () => {}, getCooldownUntil = () => 0, shouldReconnect = () => true, createClient = username => new TikTokLiveConnection(username, {
     processInitialData: false,
     fetchRoomInfoOnConnect: false,
     authenticateWs: false
@@ -35,6 +41,10 @@ export class GiftConnection {
     this.onLinkError = onLinkError;
     this.onFatal = onFatal;
     this.onRecovered = onRecovered;
+    this.onRateLimit = onRateLimit;
+    this.onConnected = onConnected;
+    this.getCooldownUntil = getCooldownUntil;
+    this.shouldReconnect = shouldReconnect;
     this.createClient = createClient;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
@@ -79,11 +89,13 @@ export class GiftConnection {
     if (!this.isCurrent(client, generation) || this.retryTimer) return;
     const failure = connectionFailure(error);
     if (failure.fatal) return this.fatal(failure.detail);
+    if (!this.shouldReconnect()) return this.fatal("Gift connection dropped. Automatic reconnection is off; select Connect to resume. Gifts during the outage may be missed.");
     this.clearTimer(this.connectTimer);
     this.client = undefined;
     void client.disconnect().catch(() => {});
     const backoff = Math.min(MAX_RETRY_MS, 2_000 * 2 ** Math.min(this.attempt++, 5));
     const delay = Math.min(2_147_483_647, Math.max(backoff, failure.delayMs || 0));
+    if (failure.reason === "Signing service rate limit") this.onRateLimit(Date.now() + delay);
     const reason = failure.reason === "Gift connection dropped" && !this.everConnected ? "Gift connection failed" : failure.reason;
     const detail = `${this.attempt >= 5 ? "Still unable to connect. " : ""}${reason}. Reconnecting in ${Math.ceil(delay / 1000)}s (attempt ${this.attempt}). Gifts during the outage may be missed.`;
     this.onStatus("reconnecting", detail);
@@ -95,6 +107,16 @@ export class GiftConnection {
 
   connect() {
     if (!this.username) return;
+    const cooldown = this.getCooldownUntil() - Date.now();
+    if (cooldown > 0) {
+      const delay = Math.min(2_147_483_647, cooldown);
+      this.onStatus("reconnecting", `Signing service rate limit. Reconnecting in ${Math.ceil(cooldown / 1000)}s. Gifts during the outage may be missed.`);
+      this.retryTimer = this.setTimer(() => {
+        this.retryTimer = undefined;
+        this.connect();
+      }, delay);
+      return;
+    }
     const generation = this.generation;
     let client;
     try {
@@ -158,6 +180,7 @@ export class GiftConnection {
       const recovered = this.everConnected;
       this.everConnected = true;
       this.attempt = 0;
+      this.onConnected();
       this.onStatus("connected", recovered ? "Gift connection restored. Events during the outage may have been missed." : "Gift listener active");
       if (recovered) void Promise.resolve().then(() => this.onRecovered?.()).catch(error => console.error("Could not refresh guests after reconnect", error));
     }).catch(error => this.retry(error, client, generation));

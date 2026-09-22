@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ShowStore } from "../src/store.js";
+import { normalizeGift } from "../src/gifts.js";
 
 test("persists a show, appends its research ledger, and exports CSV", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "scorekeeper-test-"));
@@ -28,6 +29,103 @@ test("persists a show, appends its research ledger, and exports CSV", async () =
     assert.equal(state.gifts.length, 1);
     assert.match(ledger, /"raw":\{"raw":true\}/);
     assert.match(store.csv(), /"Rose"/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("assigns multiple gifts together and rejects an invalid batch without partial changes", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "scorekeeper-bulk-test-"));
+  try {
+    const store = new ShowStore(directory);
+    await store.initialize();
+    await store.addParticipant({ name: "Guest", handle: "guest" });
+    const guestId = store.show.participants[0].id;
+    const gift = id => ({
+      id, receivedAt: "2026-01-01T00:00:00.000Z", sender: { name: "Viewer" },
+      gift: { id: "rose", name: "Rose", repeatCount: 1, totalValue: 1 },
+      scoreable: true, participantId: null, assignmentMethod: "unassigned"
+    });
+    await store.recordGift(gift("one"), {});
+    await store.recordGift(gift("two"), {});
+    await assert.rejects(store.assignGifts(["one", "missing"], guestId), /not found/);
+    assert.equal(store.show.gifts.find(event => event.id === "one").participantId, null);
+    await store.assignGifts(["one", "two"], guestId);
+    assert.equal(store.show.gifts.filter(event => event.participantId === guestId).length, 2);
+    const saved = JSON.parse(await readFile(path.join(directory, "active-show.json"), "utf8"));
+    assert.equal(saved.gifts.filter(event => event.participantId === guestId).length, 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("active dancer receives only new gifts that would otherwise be unassigned", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "scorekeeper-dancer-test-"));
+  try {
+    const store = new ShowStore(directory);
+    await store.initialize();
+    await store.newShow({ title: "Multi-guest show", hostUsername: "host" });
+    await store.updateHost({ userId: "host-id", name: "Host", handle: "host" });
+    await store.addParticipant({ name: "Arliz", handle: "arliz" });
+    await store.addParticipant({ name: "Odette", handle: "odette" });
+    const arliz = store.show.participants.find(item => item.handle === "arliz");
+    const odette = store.show.participants.find(item => item.handle === "odette");
+    const gift = (id, name = "Rose", participantId = null) => ({
+      id, receivedAt: "2026-01-01T00:00:00.000Z", sender: { name: "Viewer" },
+      gift: { id: name, name, repeatCount: 1, totalValue: 1 }, scoreable: true,
+      participantId, assignmentMethod: participantId ? "recipient-id" : "unassigned"
+    });
+    await assert.rejects(store.setActiveDancer("missing"), /Choose a guest/);
+    await assert.rejects(store.setActiveDancer(store.show.participants.find(item => item.role === "host").id), /Choose a guest/);
+    await store.setActiveDancer(arliz.id);
+    await store.recordGift(gift("unassigned-1"), {});
+    await store.recordGift(normalizeGift({
+      msgId: "host-directed", receiverUserId: "host-id", giftDetails: { giftName: "Rose", diamondCount: 1 }
+    }, store.show.participants), {});
+    await store.recordGift(gift("direct", "Direct", odette.id), {});
+    await store.setRoutingRule("Fireworks", odette);
+    await store.recordGift(gift("routed", "Fireworks"), {});
+    await store.setActiveDancer(null);
+    await store.recordGift(gift("unassigned-2"), {});
+    assert.equal(store.show.gifts.find(item => item.id === "unassigned-1").participantId, arliz.id);
+    assert.equal(store.show.gifts.find(item => item.id === "unassigned-1").assignmentMethod, "active-dancer");
+    assert.equal(store.show.gifts.find(item => item.sourceMessageId === "host-directed").participantId, arliz.id);
+    assert.equal(store.show.gifts.find(item => item.id === "direct").participantId, odette.id);
+    assert.equal(store.show.gifts.find(item => item.id === "routed").participantId, odette.id);
+    assert.equal(store.show.gifts.find(item => item.id === "unassigned-2").participantId, null);
+    await store.setActiveDancer(odette.id);
+    const reopened = new ShowStore(directory);
+    await reopened.initialize();
+    assert.equal(reopened.show.activeDancerId, odette.id);
+    assert.equal(reopened.show.gifts.find(item => item.id === "unassigned-1").participantId, arliz.id);
+    await reopened.removeParticipant(odette.id);
+    assert.equal(reopened.show.activeDancerId, null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a completed streak keeps the dancer active when the streak began", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "scorekeeper-dancer-streak-test-"));
+  try {
+    const store = new ShowStore(directory);
+    await store.initialize();
+    await store.addParticipant({ name: "First", handle: "first" });
+    await store.addParticipant({ name: "Second", handle: "second" });
+    const [first, second] = store.show.participants;
+    const gift = (id, receivedAt, scoreable) => ({
+      id, receivedAt, sender: { userId: "viewer" },
+      gift: { id: "rose", name: "Rose", giftType: 1, repeatCount: 1, totalValue: 1 },
+      scoreable, participantId: null, assignmentMethod: "unassigned"
+    });
+    await store.setActiveDancer(first.id);
+    await store.recordGift(gift("pending", "2026-01-01T00:00:00.000Z", false), {});
+    await store.setActiveDancer(second.id);
+    await store.recordGift(gift("complete", "2026-01-01T00:00:01.000Z", true), {});
+    assert.equal(store.show.gifts.length, 1);
+    assert.equal(store.show.gifts[0].id, "pending");
+    assert.equal(store.show.gifts[0].participantId, first.id);
+    assert.equal(store.show.gifts[0].scoreable, true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -170,6 +268,64 @@ test("routes a configured gift to the chosen guest regardless of recipient", asy
     const reopened = new ShowStore(directory);
     await reopened.initialize();
     assert.deepEqual(Object.keys(reopened.routingRules), ["drip brewing"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("moves earlier host gifts to unassigned when guests join", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "scorekeeper-host-test-"));
+  try {
+    const store = new ShowStore(directory);
+    await store.initialize();
+    await store.newShow({ title: "Multi-guest show", hostUsername: "host" });
+    await store.updateHost({ userId: "host-id", name: "Host", handle: "host" });
+    const hostId = store.show.participants[0].id;
+    await store.recordGift(normalizeGift({
+      msgId: "host-before", receiverUserId: "host-id", giftDetails: { giftName: "Rose", diamondCount: 1 }
+    }, store.show.participants), {});
+    assert.equal(store.show.gifts[0].participantId, hostId);
+
+    await store.upsertDiscoveredParticipants([{ userId: "guest-id", name: "Guest", handle: "guest" }]);
+    assert.equal(store.show.gifts[0].participantId, null);
+    assert.equal(store.snapshot().scores.some(score => score.participant.id === hostId), false);
+    assert.equal(store.snapshot().scores.find(score => score.participant.id === null).points, 1);
+    assert.match(store.csv(), /"Unassigned"/);
+
+    await store.recordGift(normalizeGift({
+      msgId: "host-after", receiverUserId: "host-id", giftDetails: { giftName: "Rose", diamondCount: 1 }
+    }, store.show.participants), {});
+    assert.equal(store.show.gifts[0].participantId, null);
+    await assert.rejects(store.assignGift(store.show.gifts[0].id, hostId), /Host gifts stay unassigned/);
+    await assert.rejects(store.setRoutingRule("Rose", store.show.participants[0]), /host cannot receive routed gifts/);
+
+    const reopened = new ShowStore(directory);
+    await reopened.initialize();
+    assert.equal(reopened.show.gifts.every(event => event.participantId === null), true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("removes a host mistakenly discovered from a gift before the roster arrives", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "scorekeeper-host-duplicate-test-"));
+  try {
+    const store = new ShowStore(directory);
+    await store.initialize();
+    await store.newShow({ title: "Test show", hostUsername: "host" });
+    await store.upsertDiscoveredParticipants([{ userId: "host-id", name: "Host display name" }]);
+    const duplicate = store.show.participants.find(item => item.role === "guest");
+    assert.ok(duplicate);
+    await store.recordGift(normalizeGift({
+      msgId: "before-roster", receiverUserId: "host-id", giftDetails: { giftName: "Rose", diamondCount: 1 }
+    }, store.show.participants), {});
+    assert.equal(store.show.gifts[0].participantId, duplicate.id);
+
+    await store.updateHost({ userId: "host-id", name: "Host display name", handle: "host" });
+    await store.upsertDiscoveredParticipants([{ userId: "real-guest", name: "Real guest" }]);
+    assert.equal(store.show.participants.some(item => item.id === duplicate.id), false);
+    assert.equal(store.show.gifts[0].participantId, null);
+    assert.equal(store.snapshot().scores.find(score => score.participant.id === null).points, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

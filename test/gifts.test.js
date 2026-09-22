@@ -3,9 +3,24 @@ import assert from "node:assert/strict";
 import { calculateScores, extractRecipient, inferParticipantId, normalizeGift } from "../src/gifts.js";
 
 const participants = [
-  { id: "host", name: "Host", handle: "host_name", tiktokUserId: "100" },
-  { id: "guest", name: "Guest", handle: "guest_name", tiktokUserId: "200" }
+  { id: "host", role: "host", name: "Host", handle: "host_name", tiktokUserId: "100" },
+  { id: "guest", role: "guest", name: "Guest", handle: "guest_name", tiktokUserId: "200" }
 ];
+
+test("keeps host-directed gifts unassigned in a multi-guest show", () => {
+  assert.deepEqual(inferParticipantId({ receiverUserId: "100" }, participants), {
+    participantId: null,
+    method: "unassigned"
+  });
+  assert.equal(inferParticipantId({ receiver: { uniqueId: "host_name" } }, participants).participantId, null);
+  const show = {
+    participants,
+    gifts: [{ participantId: "host", scoreable: true, gift: { totalValue: 10, repeatCount: 1 } }]
+  };
+  const scores = calculateScores(show);
+  assert.equal(scores.some(score => score.participant.id === "host"), false);
+  assert.equal(scores.find(score => score.participant.id === null).points, 10);
+});
 
 test("attributes a gift using a receiver user ID", () => {
   assert.deepEqual(inferParticipantId({ receiverUserId: "200" }, participants), {

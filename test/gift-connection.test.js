@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { SignatureRateLimitError } from "tiktok-live-connector";
-import { GiftConnection, connectionFailure } from "../src/gift-connection.js";
+import { SignConfig, SignatureRateLimitError } from "tiktok-live-connector";
+import { GiftConnection, configureSigningKey, connectionFailure } from "../src/gift-connection.js";
 
-function harness({ saveGift = async () => {}, saveRoom = async () => {} } = {}) {
+function harness({ saveGift = async () => {}, saveRoom = async () => {}, shouldReconnect = () => true, getCooldownUntil = () => 0, onRateLimit = () => {}, onConnected = () => {} } = {}) {
   const clients = [];
   const statuses = [];
   const timers = new Map();
@@ -25,6 +25,10 @@ function harness({ saveGift = async () => {}, saveRoom = async () => {} } = {}) 
     onGift: async gift => { gifts.push(gift); await saveGift(gift); },
     onLink: async data => { linkUpdates.push(data); },
     onRecovered: async () => { recovered++; },
+    shouldReconnect,
+    getCooldownUntil,
+    onRateLimit,
+    onConnected,
     setTimer: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
     clearTimer: id => timers.delete(id)
   });
@@ -72,6 +76,16 @@ test("cancels a scheduled reconnect when stopped", async () => {
   assert.equal(h.clients.length, 1);
 });
 
+test("stops with an actionable error when automatic reconnection is disabled", async () => {
+  const h = harness({ shouldReconnect: () => false });
+  h.listener.start("creator");
+  await h.settle();
+  h.clients[0].emit("disconnected", { code: 1006 });
+  assert.equal(h.statuses.at(-1).state, "error");
+  assert.match(h.statuses.at(-1).detail, /Automatic reconnection is off/);
+  assert.equal(h.timers.size, 0);
+});
+
 test("a stalled connection times out and retries", async () => {
   const h = harness();
   h.listener.createClient = () => {
@@ -113,4 +127,46 @@ test("stops and alerts when the host ends the stream", async () => {
 test("respects the signing service retry-after header", () => {
   const error = new SignatureRateLimitError(null, "Rate limited", { headers: { "retry-after": "600" } });
   assert.equal(connectionFailure(error).delayMs, 600_000);
+});
+
+test("waits out a saved signing cooldown before creating a client", async () => {
+  const retryAt = Date.now() + 600_000;
+  const h = harness({ getCooldownUntil: () => retryAt });
+  h.listener.start("creator");
+  assert.equal(h.clients.length, 0);
+  assert.equal(h.statuses.at(-1).state, "reconnecting");
+  assert.match(h.statuses.at(-1).detail, /rate limit/);
+  assert.equal(h.timers.size, 1);
+  h.listener.stop();
+});
+
+test("records a signing cooldown when the provider rate limits a connection", async () => {
+  let retryAt = 0;
+  const h = harness({ onRateLimit: until => { retryAt = until; } });
+  h.listener.createClient = () => {
+    const client = new EventEmitter();
+    client.connect = async () => { throw new SignatureRateLimitError(null, "Rate limited", { headers: { "retry-after": "600" } }); };
+    client.disconnect = async () => {};
+    h.clients.push(client);
+    return client;
+  };
+  h.listener.start("creator");
+  await h.settle();
+  assert.ok(retryAt >= Date.now() + 590_000);
+  assert.equal(h.statuses.at(-1).state, "reconnecting");
+  h.listener.stop();
+});
+
+test("a changed API key invalidates the connector's cached signing client", () => {
+  const oldKey = SignConfig.apiKey;
+  const oldClient = SignConfig.cachedInstance;
+  try {
+    SignConfig.cachedInstance = { stale: true };
+    configureSigningKey("new-key");
+    assert.equal(SignConfig.apiKey, "new-key");
+    assert.equal(SignConfig.cachedInstance, undefined);
+  } finally {
+    SignConfig.apiKey = oldKey;
+    SignConfig.cachedInstance = oldClient;
+  }
 });

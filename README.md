@@ -17,8 +17,16 @@ In the app:
 
 1. Enter the host's TikTok username in the title bar and click **Connect** after the host is live. The button switches to **Disconnect** while connected. A new show starts for that stream session, and later segments of the same session stay in the show. A muted TikTok receiver opens the LIVE in a separate window for guest discovery, handles TikTok's **Watch on this computer** prompt if it appears, and shows sign-in if needed. It closes automatically after capturing the roster. Discovery progress appears in the bottom status bar.
 2. The app imports cohosts, multi-guests, and battle participants when TikTok supplies them in a room roster and continues merging link-layer updates automatically.
-3. Use the **⋯** tools menu in the title bar (or Ctrl+Shift+G) to **Simulate gift** and test scoring without a live stream. The same menu holds guest refresh, the OBS overlay URL, and CSV export.
+3. Use the **⋯** tools menu in the title bar for guest refresh, the OBS overlay URL, settings, and CSV export.
 4. Copy the OBS overlay URL from the tools menu (or Ctrl+Shift+O) and add it as a 1920×1080 Browser Source.
+
+Open **⋯ → Settings** (or Ctrl+,) to use the Connection, Gifts, Guest names, Ranking, and Routing tabs. Configure auto-connect on launch, reconnect after a dropped gift connection, the minimum gift value shown in the event list, and an optional Ding, Chime, or Pop sound for completed gifts. Preview sounds in the Gifts tab. Gifts below the display threshold stay silent but continue to count toward scores. Gift routing rules save as soon as they are added or removed.
+
+The Connection tab accepts an optional Euler Stream API key for the standalone gift listener. The key is encrypted with the operating system's secure storage and kept outside `settings.json`. Leave the field blank to retain the saved key, or select **Remove saved API key** to return to community signing limits. A changed key takes effect on the next connection attempt; an in-progress retry starts again immediately. The app also saves a signing-service rate-limit cooldown across restarts and waits until the service's retry time before requesting another connection. During development, file changes no longer automatically reload or restart the app, avoiding blank windows and unnecessary signing requests. Restart manually to load code changes.
+
+Settings also let you assign short names to discovered guests and design a ranking comment. The comment template uses `{rankings}`; the guest entry template supports `{name}`, `{score}`, and `{rank}`. The separator joins entries. A live preview shows the current scores, with large scores abbreviated as `k` or `m`. Guest aliases only affect this comment format, not the scoreboard or gift attribution. These settings are saved between launches.
+
+Use **Scoreboard → ⋯ → Copy formatted ranking comment** to copy the current guest ranking with your saved names and comment format.
 
 The overlay is served only on the local machine at `http://127.0.0.1:17342/overlay`.
 
@@ -35,8 +43,12 @@ If the gift connection drops or a connection attempt times out, the app shows a 
 - A confident ID or handle match is assigned automatically.
 - A Group LIVE gift can auto-add its `toMemberId` / `toMemberNickname` recipient when the room roster is not available yet.
 - A show with one participant assigns gifts to that participant.
+- In a multi-guest show, the host is omitted from the scoreboard, recipient choices, and overlay; gifts directed to the host remain **Unassigned**.
 - Ambiguous gifts in a multi-participant show remain **Unassigned**.
 - Use the recipient dropdown in the ledger to correct or assign an event.
+- Click a guest's scoreboard card to make them the active dancer. New gifts that would otherwise be unassigned are credited to that guest while their card is selected. The card is highlighted and labeled **Active dancer**; click it again to stop. Gifts with known recipients and gift routing rules retain their usual attribution. Existing gifts are not changed.
+- Select rows using their checkboxes, click a row, or Shift-click a range, then choose a recipient in the bulk toolbar to assign up to 300 displayed events at once. The header checkbox selects all displayed rows.
+- Gifts that arrive while the app is hidden or unfocused remain highlighted when you return. Use the **Missed** filter to inspect them and **Mark missed as seen** to clear the highlights.
 
 This conservative behavior prevents a missing recipient field from silently crediting the wrong guest.
 

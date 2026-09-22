@@ -69,9 +69,11 @@ export function inferParticipantId(raw, participants) {
   const recipient = extractRecipient(raw);
   const ids = recipient.userId ? [recipient.userId] : [];
   const names = recipient.name ? [recipient.name.toLowerCase()] : [];
+  const multiGuest = participants.some(participant => participant.role === "guest");
 
   for (const participant of participants) {
     if (participant.tiktokUserId && ids.includes(text(participant.tiktokUserId))) {
+      if (multiGuest && participant.role === "host") return { participantId: null, method: "unassigned" };
       return { participantId: participant.id, method: "recipient-id" };
     }
 
@@ -80,6 +82,7 @@ export function inferParticipantId(raw, participants) {
       .filter(Boolean);
 
     if (handles.some(handle => names.includes(handle))) {
+      if (multiGuest && participant.role === "host") return { participantId: null, method: "unassigned" };
       return { participantId: participant.id, method: "recipient-name" };
     }
   }
@@ -138,7 +141,9 @@ export function normalizeGift(raw, participants, receivedAt = new Date()) {
 }
 
 export function calculateScores(show) {
-  const scores = new Map(show.participants.map(participant => [participant.id, {
+  const multiGuest = show.participants.some(participant => participant.role === "guest");
+  const visibleParticipants = multiGuest ? show.participants.filter(participant => participant.role !== "host") : show.participants;
+  const scores = new Map(visibleParticipants.map(participant => [participant.id, {
     participant,
     points: 0,
     coins: 0,
@@ -175,8 +180,10 @@ export function csvForShow(show) {
     "participant_handle", "assignment_method"
   ];
   const participants = new Map(show.participants.map(item => [item.id, item]));
+  const multiGuest = show.participants.some(participant => participant.role === "guest");
   const rows = show.gifts.map(event => {
     const participant = participants.get(event.participantId);
+    const credited = multiGuest && participant?.role === "host" ? null : participant;
     return [
       event.receivedAt,
       event.sender.handle,
@@ -187,8 +194,8 @@ export function csvForShow(show) {
       event.gift.unitValue,
       event.gift.totalValue,
       event.scoreable,
-      participant?.name || "Unassigned",
-      participant?.handle || "",
+      credited?.name || "Unassigned",
+      credited?.handle || "",
       event.assignmentMethod
     ].map(quote).join(",");
   });
