@@ -33,8 +33,29 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Require signing credentials for releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          if (-not $env:WIN_CSC_LINK -or -not $env:WIN_CSC_KEY_PASSWORD) {
+            throw 'Signed releases require WIN_CSC_LINK (base64 PFX) and WIN_CSC_KEY_PASSWORD repository secrets.'
+          }
+
       - name: Build portable Windows executable
-        run: npm run dist -- --win portable --x64 --publish never
+        shell: pwsh
+        env:
+          WIN_CSC_LINK: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.WIN_CSC_LINK || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            npm run dist -- --win portable --x64 --publish never --config.forceCodeSigning=true
+          } else {
+            npm run dist -- --win portable --x64 --publish never
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify executable
         shell: pwsh
@@ -59,6 +80,17 @@ jobs:
           }
 
           Write-Output "Built $($executable.Name) ($($executable.Length) bytes)."
+
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $appExecutable = Join-Path 'dist/win-unpacked' 'TikTok LIVE Scorekeeper.exe'
+            foreach ($file in @($appExecutable, $executable.FullName)) {
+              $signature = Get-AuthenticodeSignature -LiteralPath $file
+              if ($signature.Status -ne 'Valid') {
+                throw "Release binary is not validly signed: $file ($($signature.Status))."
+              }
+              Write-Output "Verified Authenticode signature for $file: $($signature.SignerCertificate.Subject)"
+            }
+          }
 
       - name: Upload portable executable
         uses: actions/upload-artifact@v7
