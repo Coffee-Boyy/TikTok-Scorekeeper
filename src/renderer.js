@@ -106,8 +106,8 @@ function render(next) {
   discovery.textContent = state.discovery?.detail || "Guest discovery idle";
   renderScoreboard();
   const canCopyRanking = state.scores.some(score => score.participant?.role === "guest");
-  byId("scoreboard-menu-button").disabled = !canCopyRanking;
-  if (!canCopyRanking) setScoreboardMenu(false);
+  byId("copy-ranking").disabled = !canCopyRanking;
+  byId("reset-scores").disabled = !state.show.gifts.some(event => event.scoreable && (event.scoreEpoch ?? 0) === (state.show.scoreEpoch ?? 0));
   renderLedger();
   if (settingsDialog.open) updateRankingPreview();
 }
@@ -283,6 +283,12 @@ scoreboardButton.addEventListener("click", () => {
 byId("copy-ranking").addEventListener("click", () => {
   setScoreboardMenu(false);
   perform(() => window.scorekeeper.copyRanking(), "Formatted ranking comment copied.");
+});
+
+byId("reset-scores").addEventListener("click", async () => {
+  setScoreboardMenu(false);
+  if (!window.confirm("Reset all current scores to zero? Recorded gift events and CSV history will be kept.")) return;
+  await perform(() => window.scorekeeper.resetScores(), "Scores reset. Gift history was kept.");
 });
 
 toolsMenu.addEventListener("click", event => {
@@ -583,7 +589,7 @@ function openSettings() {
   byId("setting-euler-key").disabled = false;
   byId("setting-remove-euler-key").checked = false;
   byId("remove-euler-key-label").hidden = settings.eulerApiKeySource !== "saved";
-  byId("setting-euler-key").placeholder = settings.eulerApiKeySource === "saved" ? "Leave blank to keep saved key" : "Paste an API key";
+  byId("setting-euler-key").placeholder = settings.eulerApiKeySource === "saved" || settings.eulerApiKeySource === "environment" ? "****" : "Paste an API key";
   byId("euler-key-status").textContent = settings.eulerApiKeyError || ({ saved: "A saved API key is configured.", environment: "Using the SIGN_API_KEY environment variable.", none: "No API key configured; using community signing limits." })[settings.eulerApiKeySource];
   byId("setting-min-coins").value = settings.minVisibleCoins;
   byId("setting-gift-sound").checked = settings.playGiftSound;
@@ -604,6 +610,8 @@ function openSettings() {
 }
 
 byId("settings").addEventListener("click", openSettings);
+byId("euler-key-help").addEventListener("click", () => perform(() => window.scorekeeper.openEulerKeyHelp()));
+byId("euler-pricing-help").addEventListener("click", () => perform(() => window.scorekeeper.openEulerPricingHelp()));
 byId("settings-cancel").addEventListener("click", () => settingsDialog.close());
 byId("settings-save").addEventListener("click", async () => {
   for (const [inputId, tabId] of [["setting-min-coins", "settings-tab-gifts"], ["setting-ranking-template", "settings-tab-ranking"], ["setting-ranking-entry", "settings-tab-ranking"]]) {

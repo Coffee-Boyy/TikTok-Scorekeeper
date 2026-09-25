@@ -159,7 +159,7 @@ export function calculateScores(show) {
   };
 
   for (const event of show.gifts) {
-    if (!event.scoreable) continue;
+    if (!event.scoreable || (event.scoreEpoch ?? 0) !== (show.scoreEpoch ?? 0)) continue;
     const score = scores.get(event.participantId) || unassigned;
     score.points += number(event.gift.totalValue) || number(event.gift.repeatCount, 1);
     score.coins += number(event.gift.totalValue);

@@ -34,6 +34,38 @@ test("persists a show, appends its research ledger, and exports CSV", async () =
   }
 });
 
+test("reset scores starts a new round without deleting gift history or guests", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "scorekeeper-reset-test-"));
+  try {
+    const store = new ShowStore(directory);
+    await store.initialize();
+    await store.newShow({ title: "Live show", hostUsername: "host" });
+    await store.addParticipant({ name: "Guest", handle: "guest" });
+    const guest = store.show.participants.find(item => item.handle === "guest");
+    const gift = (id, value) => ({
+      id, receivedAt: "2026-01-01T00:00:00.000Z", sender: { name: "Viewer" },
+      gift: { id: "rose", name: "Rose", repeatCount: 1, totalValue: value },
+      scoreable: true, participantId: guest.id, assignmentMethod: "recipient-id"
+    });
+    await store.recordGift(gift("before", 10), {});
+    assert.equal(store.snapshot().scores.find(score => score.participant.id === guest.id).points, 10);
+
+    await store.resetScores();
+    assert.equal(store.show.gifts.length, 1);
+    assert.equal(store.snapshot().scores.find(score => score.participant.id === guest.id).points, 0);
+    assert.match(store.csv(), /"Rose"/);
+
+    await store.recordGift(gift("after", 5), {});
+    assert.equal(store.snapshot().scores.find(score => score.participant.id === guest.id).points, 5);
+    const reopened = new ShowStore(directory);
+    await reopened.initialize();
+    assert.equal(reopened.show.gifts.length, 2);
+    assert.equal(reopened.snapshot().scores.find(score => score.participant.id === guest.id).points, 5);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("assigns multiple gifts together and rejects an invalid batch without partial changes", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "scorekeeper-bulk-test-"));
   try {

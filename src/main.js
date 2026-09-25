@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, shell } from "electron";
 import { createServer } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -641,6 +641,9 @@ function registerIpc() {
   ipcMain.handle("gift:assign", async (event, giftId, participantId) => { assertTrusted(event); await store.assignGift(giftId, participantId); return sendState(); });
   ipcMain.handle("gift:assign-many", async (event, giftIds, participantId) => { assertTrusted(event); await store.assignGifts(giftIds, participantId); return sendState(); });
   ipcMain.handle("gift:clear-missed", event => { assertTrusted(event); missedGiftIds.clear(); return sendState(); });
+  ipcMain.handle("show:reset-scores", async event => { assertTrusted(event); await store.resetScores(); missedGiftIds.clear(); return sendState(); });
+  ipcMain.handle("help:euler-key", event => { assertTrusted(event); return shell.openExternal("https://www.eulerstream.com/docs/api/quickstart"); });
+  ipcMain.handle("help:euler-pricing", event => { assertTrusted(event); return shell.openExternal("https://www.eulerstream.com/pricing"); });
   ipcMain.handle("dancer:set", async (event, participantId) => { assertTrusted(event); await store.setActiveDancer(participantId); return sendState(); });
   ipcMain.handle("rules:set", async (event, giftName, participantId) => {
     assertTrusted(event);

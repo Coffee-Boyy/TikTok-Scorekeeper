@@ -10,7 +10,7 @@
 <body>
   <header class="titlebar">
     <div class="brand">
-      <span class="logo" aria-hidden="true"></span>
+      <img class="logo" src="icon.svg" alt="" aria-hidden="true">
       <h1>TikTok LIVE Scorekeeper</h1>
     </div>
     <span class="divider" aria-hidden="true"></span>
@@ -25,7 +25,7 @@
       <input id="username" aria-label="Host username" autocomplete="off" placeholder="@creator">
       <button id="connect" class="button success">Connect</button>
       <div class="menu-anchor">
-        <button id="tools-menu-button" class="button ghost icon-button menu-button" aria-haspopup="true" aria-expanded="false" aria-controls="tools-menu" title="Session tools: guests, overlay URL, settings, export" aria-label="Session tools">&#8943;</button>
+        <button id="tools-menu-button" class="button ghost icon-button menu-button" aria-haspopup="true" aria-expanded="false" aria-controls="tools-menu" title="Session tools: guests, overlay URL, settings, export" aria-label="Session tools"><svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v2m0 13v2m8.5-8.5h-2m-13 0h-2m14.5-6.5-1.4 1.4M7.4 16.6 6 18m12 0-1.4-1.4M7.4 7.4 6 6m6 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg></button>
         <div id="tools-menu" class="popover" role="menu" aria-labelledby="tools-menu-button" hidden>
           <p class="popover-heading">Session tools</p>
           <button class="menu-item" role="menuitem" id="discover-guests"><span>Refresh guests</span><kbd>Ctrl G</kbd></button>
@@ -49,6 +49,8 @@
           <button id="scoreboard-menu-button" class="button ghost icon-button menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="scoreboard-menu" aria-label="Scoreboard options" title="Scoreboard options">&#8943;</button>
           <div id="scoreboard-menu" class="popover" role="menu" aria-labelledby="scoreboard-menu-button" hidden>
             <button id="copy-ranking" class="menu-item" type="button" role="menuitem">Copy formatted ranking comment</button>
+            <span class="popover-sep"></span>
+            <button id="reset-scores" class="menu-item menu-item-danger" type="button" role="menuitem">Reset scores</button>
           </div>
         </div>
       </div>
@@ -109,6 +111,7 @@
             <input id="setting-euler-key" type="password" maxlength="2048" autocomplete="new-password" spellcheck="false" placeholder="Paste an API key">
           </label>
           <p id="euler-key-status" class="settings-help"></p>
+          <p class="settings-help">To get a key, create an Euler Stream account and create an API key in its dashboard. <button id="euler-key-help" class="inline-link" type="button">Key setup guide ↗</button> Some signing routes require a paid plan; <button id="euler-pricing-help" class="inline-link" type="button">check plan access ↗</button>.</p>
           <label id="remove-euler-key-label" class="settings-check" hidden><input id="setting-remove-euler-key" type="checkbox"> Remove saved API key</label>
           <p class="settings-help">Saved encrypted on this computer. A new key is used on the next connection, or immediately if the listener is retrying.</p>
         </div>

@@ -124,6 +124,7 @@ export class ShowStore {
       streamSessionId: "",
       segments: [],
       activeDancerId: null,
+      scoreEpoch: 0,
       participants: cleanHost ? [{
         id: crypto.randomUUID(),
         name: cleanHost,
@@ -197,6 +198,13 @@ export class ShowStore {
 
   async newShow(input) {
     this.show = this.createShow(input);
+    await this.persist();
+    return this.snapshot();
+  }
+
+  async resetScores() {
+    this.show.scoreEpoch = (this.show.scoreEpoch || 0) + 1;
+    this.show.scoreResetAt = new Date().toISOString();
     await this.persist();
     return this.snapshot();
   }
@@ -410,12 +418,14 @@ export class ShowStore {
     if (existingIndex >= 0) {
       const existing = this.show.gifts[existingIndex];
       normalized.id = existing.id;
+      normalized.scoreEpoch = existing.scoreEpoch ?? 0;
       if (existing.assignmentMethod === "manual" || (!normalized.participantId && existing.assignmentMethod === "active-dancer")) {
         normalized.participantId = existing.participantId;
         normalized.assignmentMethod = existing.assignmentMethod;
       }
       this.show.gifts.splice(existingIndex, 1);
     }
+    normalized.scoreEpoch ??= this.show.scoreEpoch || 0;
     const rule = this.routingRules[String(normalized.gift?.name || "").toLowerCase()];
     if (rule && normalized.assignmentMethod !== "manual") {
       const routedTo = this.resolveRuleGuest(rule.guest);

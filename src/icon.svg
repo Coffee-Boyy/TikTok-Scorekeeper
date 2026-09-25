@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Scorekeeper">
+  <defs>
+    <linearGradient id="tile" x1="0" x2="1" y1="0" y2="1">
+      <stop stop-color="#ff375f"/>
+      <stop offset="1" stop-color="#b82178"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#tile)"/>
+  <path d="M15 43V31l9 6 8-17 8 17 9-6v12H15Z" fill="#0c1017" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M19 49h26" fill="none" stroke="#25f4ee" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="32" cy="19" r="3" fill="#25f4ee"/>
+</svg>
