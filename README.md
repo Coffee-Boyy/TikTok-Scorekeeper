@@ -71,7 +71,7 @@ npm run dist
 
 The configured Windows build target is a portable executable. Code signing is not configured.
 
-The [Windows build workflow](.github/workflows/build-windows.yml) runs on pushes to `main`, pull requests, and manual dispatch. It installs dependencies from `package-lock.json`, runs the tests, packages the x64 portable `.exe`, verifies the output, and uploads it as the `TikTok-Scorekeeper-Windows-x64` artifact. To download it, open the repository's **Actions** tab, select a successful **Build Windows executable** run, and download the artifact at the bottom of the run page. Extract the artifact ZIP and run the `.exe`; installation is not required. The executable is unsigned, so Windows may show a publisher warning.
+The [Windows build workflow](.github/workflows/build-windows.yml) runs on pushes to `main`, pull requests, version tags, and manual dispatch. It installs dependencies from `package-lock.json`, runs the tests, packages the x64 portable `.exe`, verifies the output, and uploads it as the `TikTok-Scorekeeper-Windows-x64` artifact. Pushing a `v*` tag also publishes the executable on the [GitHub Releases page](https://github.com/Coffee-Boyy/TikTok-Scorekeeper/releases). For other builds, open the repository's **Actions** tab, select a successful **Build Windows executable** run, and download the artifact at the bottom of the run page. Extract the artifact ZIP and run the `.exe`; installation is not required. The executable is unsigned, so Windows may show a publisher warning.
 
 ## Important limitations
 
